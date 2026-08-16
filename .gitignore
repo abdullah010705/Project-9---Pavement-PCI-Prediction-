@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+*.ipynb_checkpoints
+
+# Generated artifacts — regenerate via run_pipeline.py rather than committing
+models/*
+!models/.gitkeep
+results/*
+!results/.gitkeep
+plots/*
+!plots/.gitkeep
+
+# Editor / tool leftovers
+.Rhistory
+.Rproj.user/
+.idea/
+.vscode/
+*.swp
