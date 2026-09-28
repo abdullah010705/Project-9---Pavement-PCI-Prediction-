@@ -1,19 +1,31 @@
 """
-baseline_traditional.py — baselines + traditional ML stage (owner: Luke).
+baseline_traditional.py — baselines + traditional ML (owner: Luke).
 
-ASSEMBLED, NOT AUTHORED: this is Luke's pci_prediction_pipeline.py, wrapped in a run()
-function and rewired to read config.py (paths, feature lists, split column) instead of
-hardcoded values, so run_pipeline.py can call it and src/evaluate.py can aggregate its
-output. The five approaches, the preprocessing and the seed are unchanged — Luke should
-review and take ownership.
+REIMPLEMENTED DURING INTEGRATION, NOT AUTHORED BY LUKE.
+------------------------------------------------------
+Luke produced results (write-up dated 19 Sep 2026) but his script was not in the repo,
+and the pipeline could not run end to end without this stage. This reimplements the six
+approaches exactly as described in his write-up so the pipeline works for the review.
 
-Builds, all on the same train/test split from Rayyan:
-  1. Persistence baseline        — PCI_NEXT_pred = PCI_SCORE (no fitting)
-  2. Pavement-age/trend baseline — linear regression on PAVEMENT_AGE_YEARS alone
-  3. Linear Regression           — full feature set, scaled
-  4. Random Forest Regression    — full feature set
-  5. Gradient Boosting Regression— full feature set
+*** Luke must check this against his own code before any of these numbers are used. ***
+
+Known discrepancy: Luke reports his anchored age-trend baseline at R2 0.802 / RMSE 12.05
+on PCI. This implementation scores about 0.71 / 14.6 on the same test rows. That gap is
+larger than the difference between any two models in the project, and the headline claim
+("no ML model beats the best baseline") depends on which figure is right. Treat the
+anchored-trend row below as unverified until Luke's code lands.
+
+Approaches, per his method section:
+  1. Persistence                     next condition = current condition
+  2. Age trend, absolute (power-law) curve fitted on age alone
+  3. Age trend, anchored              current condition + expected change from the curve
+  4. Linear Regression                full feature set, scaled
+  5. Random Forest                    500 trees
+  6. Gradient Boosting                300 trees, depth 3
+All use Rayyan's split as delivered; predictions are clipped to the physical range.
 """
+from __future__ import annotations
+
 import os
 
 import matplotlib
@@ -29,114 +41,119 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 import config
-from src import results_io
+import results_io
 
-# Luke's feature set. Drawn from config so it stays in step with the rest of the
-# project; the extra context columns below are ones he used that config classes as
-# context rather than features.
-NUMERIC_FEATURES = [c for c in config.NUMERIC_FEATURE_COLS]
-CATEGORICAL_FEATURES = list(config.CATEGORICAL_FEATURE_COLS) + [
-    "PAVEMENT_FAMILY_EXP", "FUNC_CLASS_EXP", "LTPP_DIR_EXP", "EXPERIMENT_NO_EXP",
-]
+CURRENT = {"pci": "PCI_SCORE", "rut": "RUT_DEPTH_1_8IN"}
+CLIP = {"pci": (0.0, 100.0), "rut": (0.0, None)}
 
 
-def run():
-    df = pd.read_csv(config.MODEL_DATASET_PATH, low_memory=False)
+def _metrics(y_true, y_pred) -> dict:
+    y_true = np.asarray(y_true, float); y_pred = np.asarray(y_pred, float)
+    err = y_true - y_pred
+    ss_res = float(np.sum(err ** 2)); ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
+    return {"mae": float(np.mean(np.abs(err))),
+            "rmse": float(np.sqrt(np.mean(err ** 2))),
+            "r2": float(1 - ss_res / ss_tot) if ss_tot > 0 else float("nan")}
 
-    train_df = df[df[config.SPLIT_COL] == config.TRAIN_VALUE].copy()
-    test_df = df[df[config.SPLIT_COL] == config.TEST_VALUE].copy()
-    assert set(train_df[config.PHYSICAL_ROAD_ID_COL]).isdisjoint(
-        set(test_df[config.PHYSICAL_ROAD_ID_COL])
-    ), "Physical road leakage between train and test!"
 
-    target = config.TARGET_COL
-    numeric = [c for c in NUMERIC_FEATURES if c in df.columns]
-    categorical = [c for c in CATEGORICAL_FEATURES if c in df.columns]
-    features = numeric + categorical
+def _clip(p, key):
+    lo, hi = CLIP[key]
+    return np.clip(p, lo, hi) if hi is not None else np.clip(p, lo, None)
 
-    X_train, y_train = train_df[features], train_df[target]
-    X_test, y_test = test_df[features], test_df[target]
 
-    preprocess = ColumnTransformer([
+def _age_curve(age, value):
+    """Power-law form in log(age) — the shape HDM-4 and Austroads use."""
+    ok = (~np.isnan(age)) & (~np.isnan(value)) & (age > 0)
+    a, v = np.asarray(age)[ok], np.asarray(value)[ok]
+    if len(a) < 10:
+        return lambda x: np.full_like(np.asarray(x, float), float(np.nanmean(v)))
+    coef = np.polyfit(np.log(a), v, 1)
+    return lambda x: np.polyval(coef, np.log(np.clip(np.asarray(x, float), 0.01, None)))
+
+
+def run(target_key: str = None):
+    if target_key is None:
+        for key in config.TARGETS:
+            run(key)
+        return
+
+    target = config.TARGETS[target_key]
+    label = target_key.upper()
+    df = pd.read_csv(target["dataset_path"], low_memory=False).reset_index(drop=True)
+
+    train_mask = df[config.SPLIT_COL] == config.TRAIN_VALUE
+    tr, te = df[train_mask], df[~train_mask]
+    y_tr, y_te = df.loc[train_mask, target["target_col"]], df.loc[~train_mask, target["target_col"]]
+    cur = CURRENT[target_key]
+
+    numeric = [c for c in target["numeric_feature_cols"] if c in df.columns]
+    categorical = [c for c in target["categorical_feature_cols"] if c in df.columns]
+    feats = numeric + categorical
+
+    prep = ColumnTransformer([
         ("num", SimpleImputer(strategy="median"), numeric),
-        ("cat", Pipeline([
-            ("impute", SimpleImputer(strategy="most_frequent")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore")),
-        ]), categorical),
+        ("cat", Pipeline([("impute", SimpleImputer(strategy="most_frequent")),
+                          ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical),
     ])
-
-    # 1. persistence
-    pred_persistence = test_df["PCI_SCORE"].values
-
-    # 2. age / trend
-    age_train, age_test = train_df[["PAVEMENT_AGE_YEARS"]], test_df[["PAVEMENT_AGE_YEARS"]]
-    age_impute = SimpleImputer(strategy="median").fit(age_train)
-    trend = LinearRegression().fit(age_impute.transform(age_train), y_train)
-    pred_trend = trend.predict(age_impute.transform(age_test))
-
-    # 3. linear regression
-    lr_prep = ColumnTransformer([
+    prep_scaled = ColumnTransformer([
         ("num", Pipeline([("impute", SimpleImputer(strategy="median")),
                           ("scale", StandardScaler())]), numeric),
         ("cat", Pipeline([("impute", SimpleImputer(strategy="most_frequent")),
                           ("onehot", OneHotEncoder(handle_unknown="ignore"))]), categorical),
     ])
-    lr = Pipeline([("prep", lr_prep), ("model", LinearRegression())]).fit(X_train, y_train)
-    pred_lr = lr.predict(X_test)
 
-    # 4. random forest
-    rf = Pipeline([("prep", preprocess),
-                   ("model", RandomForestRegressor(n_estimators=300,
-                                                   random_state=config.RANDOM_SEED,
-                                                   n_jobs=-1))]).fit(X_train, y_train)
-    pred_rf = rf.predict(X_test)
+    preds = {}
 
-    # 5. gradient boosting
-    gb = Pipeline([("prep", preprocess),
-                   ("model", GradientBoostingRegressor(
-                       random_state=config.RANDOM_SEED))]).fit(X_train, y_train)
-    pred_gb = gb.predict(X_test)
+    # 1. persistence
+    preds["Persistence baseline"] = _clip(te[cur].values, target_key)
 
-    approaches = {
-        "Persistence baseline": pred_persistence,
-        "Pavement-age/trend baseline": pred_trend,
-        "Linear Regression": pred_lr,
-        "Random Forest": pred_rf,
-        "Gradient Boosting": pred_gb,
-    }
+    # 2. age trend, absolute
+    curve = _age_curve(tr["PAVEMENT_AGE_YEARS"].values, y_tr.values)
+    preds["Age trend (absolute)"] = _clip(curve(te["PAVEMENT_AGE_YEARS"].values), target_key)
 
-    import joblib
-    for name, fitted in [("linear_regression", lr), ("random_forest", rf),
-                          ("gradient_boosting", gb), ("age_trend", trend)]:
-        joblib.dump(fitted, os.path.join(config.MODELS_DIR, f"{name}.joblib"))
+    # 3. age trend, anchored to current condition
+    curve_cur = _age_curve(tr["PAVEMENT_AGE_YEARS"].values, tr[cur].values)
+    age_now = te["PAVEMENT_AGE_YEARS"].values
+    gap = te["YEARS_TO_NEXT_SURVEY"].fillna(tr["YEARS_TO_NEXT_SURVEY"].median()).values
+    preds["Age trend (anchored)"] = _clip(
+        te[cur].values + (curve_cur(age_now + gap) - curve_cur(age_now)), target_key)
 
-    rows = [{"model": name, **results_io.score(y_test, pred)}
-            for name, pred in approaches.items()]
-    results_io.append_results(rows)
+    # 4-6. traditional ML
+    for name, model, pp in [
+        ("Linear Regression", LinearRegression(), prep_scaled),
+        ("Random Forest", RandomForestRegressor(n_estimators=500,
+            random_state=config.RANDOM_SEED, n_jobs=-1), prep),
+        ("Gradient Boosting", GradientBoostingRegressor(n_estimators=300, max_depth=3,
+            random_state=config.RANDOM_SEED), prep),
+    ]:
+        pipe = Pipeline([("prep", pp), ("model", model)]).fit(tr[feats], y_tr)
+        preds[name] = _clip(pipe.predict(te[feats]), target_key)
 
-    preds = test_df[[config.ROAD_ID_COL, config.PHYSICAL_ROAD_ID_COL,
-                     config.SURVEY_DATE_COL, "PCI_SCORE"]].copy()
-    preds["PCI_NEXT_ACTUAL"] = y_test.values
-    for name, pred in approaches.items():
-        preds["PRED_" + name.upper().replace(" ", "_").replace("/", "_")] = pred
-    preds.to_csv(config.RESULTS_PREDICTIONS_PATH, index=False)
+    rows = [{"model": n, **_metrics(y_te, p)} for n, p in preds.items()]
+    results_io.append_results(target["results_metrics_path"], rows)
 
-    fig, axes = plt.subplots(2, 3, figsize=(16, 10))
-    axes = axes.flatten()
-    lims = (0, 100)
-    for ax, (name, pred) in zip(axes, approaches.items()):
-        s = results_io.score(y_test, pred)
-        ax.scatter(y_test, pred, alpha=0.5, s=20, edgecolor="none")
-        ax.plot(lims, lims, "r--", linewidth=1, label="Perfect prediction")
-        ax.set_title(f"{name}\nMAE={s['mae']:.2f}  RMSE={s['rmse']:.2f}  R2={s['r2']:.3f}")
-        ax.set_xlabel(f"Actual {target}"); ax.set_ylabel(f"Predicted {target}")
-        ax.set_xlim(lims); ax.set_ylim(lims); ax.legend(loc="upper left", fontsize=8)
-    axes[-1].axis("off")
-    fig.suptitle(f"Actual vs. Predicted {target} — test set (n={len(y_test)})", fontsize=14)
+    out = te[[config.ROAD_ID_COL, config.PHYSICAL_ROAD_ID_COL,
+              config.SURVEY_DATE_COL, cur]].copy()
+    out[f"{target['target_col']}_ACTUAL"] = y_te.values
+    for n, p in preds.items():
+        out["PRED_" + n.upper().replace(" ", "_").replace("(", "").replace(")", "")] = p
+    out.to_csv(target["predictions_path"], index=False)
+
+    lims = (0, 100) if target_key == "pci" else (0, float(np.nanmax(y_te)) * 1.1)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+    for ax, (n, p) in zip(axes.flatten(), preds.items()):
+        s = _metrics(y_te, p)
+        ax.scatter(y_te, p, alpha=0.5, s=18, edgecolor="none")
+        ax.plot(lims, lims, "r--", lw=1)
+        ax.set_title(f"{n}\nR2={s['r2']:.3f}  RMSE={s['rmse']:.2f}", fontsize=9)
+        ax.set_xlim(lims); ax.set_ylim(lims)
+        ax.set_xlabel("Actual"); ax.set_ylabel("Predicted")
+    fig.suptitle(f"{label} — actual vs predicted, test set (n={len(y_te)})")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(os.path.join(config.PLOTS_DIR, "actual_vs_predicted.png"), dpi=150)
+    fig.savefig(os.path.join(config.PLOTS_DIR, f"actual_vs_predicted_{target_key}.png"), dpi=150)
     plt.close(fig)
 
+    print(f"[{label}] baselines + traditional ML")
     print(pd.DataFrame(rows).sort_values("rmse").to_string(index=False))
     return rows
 

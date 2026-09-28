@@ -17,5 +17,7 @@ plots/*
 .Rhistory
 .Rproj.user/
 .idea/
-.vscode/
 *.swp
+
+# .vscode IS tracked deliberately: settings.json points VS Code at .venv, which is
+# what stops the "no module named xgboost" problem when the Run button is used.

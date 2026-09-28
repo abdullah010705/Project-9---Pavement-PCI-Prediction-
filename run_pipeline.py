@@ -1,19 +1,32 @@
 """
 run_pipeline.py — single entry point for the whole project (owner: Ravtej).
 
-    python run_pipeline.py                # use cached data/model_dataset.csv
-    python run_pipeline.py --rebuild-dataset   # regenerate it from raw data first
+    python run_pipeline.py                # use cached data/model_dataset_{pci,rut}.csv
+    python run_pipeline.py --rebuild-dataset   # regenerate both datasets + split from raw data first
     python run_pipeline.py --stop-on-missing   # error instead of skipping unfinished stages
 
-Runs, in order: dataset construction -> schema validation -> EDA -> modelling ->
-evaluation -> cross-validation. Every stage reads its inputs and
-writes its outputs through config.py, so everyone is guaranteed to be using
-the same dataset, features, target, and train/test split.
+Runs, in order: dataset construction -> schema validation (both datasets +
+shared split) -> EDA -> modelling, once per target -> repair classifier ->
+evaluation. Every stage reads its inputs and writes its outputs through
+config.py, so everyone is guaranteed to be using the same datasets,
+features, targets, and train/test split.
+
+=== v2 CHANGE (Project Group Allocations v2) ===
+PCI and rutting are now two separate targets (PCI_NEXT, RUT_NEXT), each
+with its own dataset file, sharing one train/test split. This file now
+loops the modelling stages once per target in config.TARGETS, instead of
+calling each stage once. Luke's and Abdullah's run() functions take a
+target_key argument ("pci" or "rut") and are expected to train/evaluate
+against that target only — the looping lives here, not inside their code,
+so their modelling logic itself stays target-agnostic (per the v2 doc:
+"Model code (Luke and Abdullah) — target-agnostic, points at whatever
+column we name"). The PCI-below-55 classifier (Abdullah) is single-target
+(PCI only) and is run once, not looped.
 
 Stages that haven't been written yet (src/eda.py, src/models/*.py) raise
 NotImplementedError from a run() stub — by default the pipeline prints a
 skip notice and moves on, so the pipeline is runnable end-to-end at every
-point in the project, not just once all five scripts exist. Pass
+point in the project, not just once all scripts exist. Pass
 --stop-on-missing once everyone's code has landed, to make an unimplemented
 stage a hard failure instead of a skip.
 """
@@ -29,17 +42,20 @@ from src import schema_checks
 
 
 def run_dataset_stage(rebuild: bool) -> None:
-    if rebuild or not os.path.exists(config.MODEL_DATASET_PATH):
-        print(f"[pipeline] Building {config.MODEL_DATASET_PATH} from {config.RAW_DATA_PATH} ...")
+    datasets_exist = all(os.path.exists(t["dataset_path"]) for t in config.TARGETS.values()) \
+        and os.path.exists(config.SPLIT_ASSIGNMENT_PATH)
+    if rebuild or not datasets_exist:
+        print(f"[pipeline] Building both modelling datasets from {config.RAW_DATA_PATH} ...")
         from src.data import build_dataset  # imported lazily: needs scikit-learn, only when rebuilding
-        build_dataset.build_model_dataset()
+        build_dataset.build_model_datasets()
     else:
-        print(f"[pipeline] Using cached {config.MODEL_DATASET_PATH} "
+        print(f"[pipeline] Using cached {[t['dataset_path'] for t in config.TARGETS.values()]} "
               f"(pass --rebuild-dataset to regenerate from raw data).")
 
 
 def run_stage(name: str, owner: str, run_fn, stop_on_missing: bool) -> bool:
-    """Run one stage's run() function. Returns True if it ran, False if skipped."""
+    """Run one stage's run() function (optionally with args baked in via a
+    lambda/partial). Returns True if it ran, False if skipped."""
     print(f"\n[pipeline] --- {name} (owner: {owner}) ---")
     start = time.time()
     try:
@@ -57,52 +73,53 @@ def run_stage(name: str, owner: str, run_fn, stop_on_missing: bool) -> bool:
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rebuild-dataset", action="store_true",
-                         help="Regenerate model_dataset.csv from raw data instead of using the cached copy.")
+                         help="Regenerate both model_dataset_{pci,rut}.csv + split_assignment.csv from raw data.")
     parser.add_argument("--stop-on-missing", action="store_true",
                          help="Treat an unimplemented stage as a hard failure instead of skipping it.")
-    parser.add_argument("--skip-cv", action="store_true",
-                         help="Skip the cross-validation stage (the slowest part).")
-    parser.add_argument("--fast", action="store_true",
-                         help="Cut the hyperparameter search right down. For demos and "
-                              "smoke tests, not for results you intend to report.")
     args = parser.parse_args()
 
-    if args.fast:
-        os.environ["PCI_SEARCH_ITER"] = "6"
-        print("[pipeline] --fast: hyperparameter search reduced to 6 candidates. "
-              "Do not report these numbers.")
+    print("[pipeline] === Pavement condition prediction pipeline (v2: PCI + rutting, separate targets) ===")
 
-    print("[pipeline] === Pavement PCI prediction pipeline ===")
-
-    # 1. Dataset construction (Rayyan)
+    # 1. Dataset construction (Rayyan) — builds both datasets + the shared split in one pass
     print("\n[pipeline] --- dataset construction (owner: Rayyan) ---")
     run_dataset_stage(args.rebuild_dataset)
 
-    # 2. Schema validation (Ravtej) — fail fast before wasting time on later stages
+    # 2. Schema validation (Ravtej) — both datasets + the shared-split cross-check.
+    #    Fails fast, before wasting time on later stages, if either dataset or the split drifts.
     print("\n[pipeline] --- schema validation (owner: Ravtej) ---")
-    df = schema_checks.load_and_validate()
-    print(f"[pipeline] model_dataset.csv OK: {df.shape[0]} rows x {df.shape[1]} cols")
+    dfs = schema_checks.load_and_validate_all()
+    for key, df in dfs.items():
+        print(f"[pipeline] {config.TARGETS[key]['dataset_path']} OK: {df.shape[0]} rows x {df.shape[1]} cols")
 
-    # 3. EDA (Aum)
+    # 3. EDA (Aum) — one call; eda.run() is expected to cover both datasets internally
+    #    (including the "do PCI and rutting move together" comparison — see src/eda.py contract)
     from src import eda
-    run_stage("EDA", "Aum", eda.run, args.stop_on_missing)
+    run_stage("EDA (both datasets)", "Aum", eda.run, args.stop_on_missing)
 
-    # 4. Modelling (Luke + Abdullah)
+    # 3b. Feature reduction (Abdullah) — must run BEFORE modelling: it writes
+    #     results/reduced_features_<key>.json, which the model stages read.
+    from src.models import feature_reduction
+    run_stage("feature reduction", "Abdullah", feature_reduction.run, args.stop_on_missing)
+
+    # 4. Modelling (Luke + Abdullah) — run once per target, per the v2 allocation doc
     from src.models import baseline_traditional, xgboost_shap
-    run_stage("baseline + traditional ML", "Luke", baseline_traditional.run, args.stop_on_missing)
-    run_stage("XGBoost + SHAP", "Abdullah", xgboost_shap.run, args.stop_on_missing)
+    for key, spec in config.TARGETS.items():
+        run_stage(f"baseline + traditional ML — {spec['label']}", "Luke",
+                   lambda k=key: baseline_traditional.run(k), args.stop_on_missing)
+        run_stage(f"XGBoost + SHAP — {spec['label']}", "Abdullah",
+                   lambda k=key: xgboost_shap.run(k), args.stop_on_missing)
 
-    # 5. Evaluation (Ravtej — aggregates Luke's and Abdullah's results)
+    # 4b. PCI-below-55 repair classifier (Abdullah) — single target, not looped
+    from src.models import repair_classifier
+    run_stage("repair classifier (PCI < 55)", "Abdullah", repair_classifier.run, args.stop_on_missing)
+
+    # 5. Evaluation (Ravtej — aggregates Luke's and Abdullah's results, both targets)
+    from src.models import compare_vs_baselines
+    run_stage("comparison vs baselines", "Abdullah", compare_vs_baselines.run,
+              args.stop_on_missing)
+
     from src import evaluate
-    run_stage("evaluation", "Ravtej", evaluate.run, args.stop_on_missing)
-
-    # 6. Cross-validation over the whole dataset — the held-out split is only 182
-    #    rows, too few to separate the models. Skip with --skip-cv if in a hurry.
-    if not args.skip_cv:
-        from src import cross_validate
-        run_stage("cross-validation", "Abdullah", cross_validate.run, args.stop_on_missing)
-    else:
-        print("\n[pipeline] --- cross-validation SKIPPED (--skip-cv) ---")
+    run_stage("evaluation (both targets)", "Ravtej", evaluate.run, args.stop_on_missing)
 
     print("\n[pipeline] === Done ===")
 

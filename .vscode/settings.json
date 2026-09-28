@@ -1,0 +1,6 @@
+{
+  "//": "Point VS Code at the project's own virtual environment. Without this, the Run button uses /usr/bin/python3 (Apple's system Python) and every dependency appears to be missing. Create the venv first by running ./run.sh once in the terminal.",
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "terminal.integrated.cwd": "${workspaceFolder}"
+}

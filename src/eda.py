@@ -1,24 +1,39 @@
 """
-eda.py — exploratory data analysis and data-quality analysis (owner: Aum)
+EDA v2 — PCI + rutting exploratory data analysis and data-quality analysis
+Owner: Aum
 
-This stage analyses the final modelling dataset before model training. It:
-  * reports dataset size, road counts, column types and descriptive statistics
-  * audits missing, duplicate, infinite and unusual/extreme numeric values
-  * plots PCI distributions and PCI_NEXT relationships with key predictors
-  * creates a correlation matrix and ranks numeric variables by relationship
-    with future PCI (PCI_NEXT)
-  * saves all figures to /plots and tabular/markdown outputs to /results
+Purpose
+-------
+Characterise the two client-approved modelling datasets before model training:
+  * distress-only PCI dataset (target: PCI_NEXT)
+  * rutting dataset (target: RUT_NEXT)
 
-Run directly from the project root with:
+The script produces:
+  * dataset size / road counts / dtypes / descriptive statistics
+  * missing-value and unusual/extreme-value checks
+  * PCI and rut-depth distributions
+  * target relationships with pavement age, ESAL, temperature,
+    precipitation and pavement thickness
+  * separate correlation matrices and target-correlation rankings
+  * direct PCI-vs-rutting comparison on matched road-survey pairs
+  * an automatically written report-ready EDA summary
+
+Run from the project root:
     python -m src.eda
-or as part of:
-    python run_pipeline.py
+
+or directly:
+    python src/eda.py
+
+Optional custom paths:
+    python src/eda.py --pci data/model_dataset_pci.csv \
+                      --rut data/model_dataset_rut.csv
 """
 
 from __future__ import annotations
 
-import os
+import argparse
 from pathlib import Path
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -26,584 +41,688 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-import config
-from src import schema_checks
+try:
+    from scipy.stats import spearmanr
+except Exception:  # scipy is optional; pandas rank correlation is used as fallback
+    spearmanr = None
 
 
-# ---------------------------------------------------------------------
-# Output files
-# ---------------------------------------------------------------------
-OVERVIEW_PATH = os.path.join(config.RESULTS_DIR, "eda_dataset_overview.csv")
-DESCRIPTIVE_PATH = os.path.join(config.RESULTS_DIR, "eda_descriptive_statistics.csv")
-MISSING_PATH = os.path.join(config.RESULTS_DIR, "eda_missing_values.csv")
-OUTLIER_PATH = os.path.join(config.RESULTS_DIR, "eda_outlier_summary.csv")
-CORRELATION_PATH = os.path.join(config.RESULTS_DIR, "eda_correlation_matrix.csv")
-TARGET_CORRELATION_PATH = os.path.join(config.RESULTS_DIR, "eda_target_correlations.csv")
-RUT_QUALITY_PATH = os.path.join(config.RESULTS_DIR, "eda_rut_missingness_quality.csv")
-RUT_TRANSITION_PATH = os.path.join(config.RESULTS_DIR, "eda_rut_transition_quality.csv")
+# -----------------------------------------------------------------------------
+# Project paths and schema
+# -----------------------------------------------------------------------------
+THIS_FILE = Path(__file__).resolve()
+PROJECT_ROOT = THIS_FILE.parent.parent if THIS_FILE.parent.name == "src" else THIS_FILE.parent
+DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
+DEFAULT_PLOTS_DIR = PROJECT_ROOT / "plots"
+DEFAULT_RESULTS_DIR = PROJECT_ROOT / "results"
+
+PCI_TARGET = "PCI_NEXT"
+RUT_TARGET = "RUT_NEXT"
+PCI_CURRENT = "PCI_SCORE"
+RUT_CURRENT = "RUT_DEPTH_1_8IN"
+ROAD_COL = "PHYSICAL_ROAD_ID"
+LIFE_COL = "PAVEMENT_SEGMENT_ID"
+DATE_COL = "SURVEY_DATE"
+SPLIT_COL = "SPLIT"
+
+# Core predictors requested in the allocation plus useful lag/current-condition
+# variables already engineered by the dataset-construction stage.
+CANDIDATE_NUMERIC_FEATURES = [
+    "PAVEMENT_AGE_YEARS",
+    "CUM_ESAL_AT_SURVEY", "ESAL_SINCE_LAST_SURVEY",
+    "PRECIPITATION", "EVAPORATION", "PRECIP_DAYS", "TEMP_AVG",
+    "FREEZE_INDEX", "FREEZE_THAW", "SHORTWAVE_SURFACE_AVG",
+    "AC_THICKNESS_MM", "BASE_THICKNESS_MM", "SUBBASE_THICKNESS_MM",
+    "TOTAL_PAV_THICKNESS_MM", "NUM_AC_LAYERS", "NUM_LAYERS_TOTAL",
+    "PRIOR_PATCH_COUNT", "DAYS_SINCE_LAST_PATCH",
+    "PCI_SCORE", "RUT_DEPTH_1_8IN",
+    "IRI_LEFT_WHEEL_PATH", "IRI_RIGHT_WHEEL_PATH", "MRI",
+    "N_PRIOR_SURVEYS", "PCI_PREV", "PCI_CHANGE_SINCE_LAST",
+    "RUT_PREV", "RUT_CHANGE_SINCE_LAST",
+    "DAYS_SINCE_LAST_SURVEY", "YEARS_SINCE_LAST_SURVEY",
+]
+
+RELATIONSHIP_FEATURES = [
+    ("PAVEMENT_AGE_YEARS", "Pavement age (years)", "pavement_age"),
+    ("CUM_ESAL_AT_SURVEY", "Cumulative ESAL at survey", "cumulative_esal"),
+    ("ESAL_SINCE_LAST_SURVEY", "ESAL since last survey", "recent_esal"),
+    ("TEMP_AVG", "Average temperature", "temperature"),
+    ("PRECIPITATION", "Precipitation", "precipitation"),
+    ("AC_THICKNESS_MM", "AC thickness (mm)", "ac_thickness"),
+    ("TOTAL_PAV_THICKNESS_MM", "Total pavement thickness (mm)", "total_thickness"),
+]
+
+EXPECTED_STRUCTURAL_MISSING = {
+    "PCI_PREV", "PCI_CHANGE_SINCE_LAST", "RUT_PREV", "RUT_CHANGE_SINCE_LAST",
+    "DAYS_SINCE_LAST_SURVEY", "YEARS_SINCE_LAST_SURVEY", "ESAL_SINCE_LAST_SURVEY",
+}
 
 
-# ---------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------
-
-def _boxplot_label_kwarg(labels):
-    """matplotlib renamed boxplot's `labels` argument to `tick_labels` in 3.9 and
-    removed the old name in 3.11. Pick whichever this install accepts, so the pipeline
-    runs on both old and new matplotlib rather than forcing everyone onto one version.
-    """
-    from matplotlib import __version__ as _mpl_version
-    major, minor = (int(x) for x in _mpl_version.split(".")[:2])
-    key = "tick_labels" if (major, minor) >= (3, 9) else "labels"
-    return {key: labels}
+def ensure_dirs(plots_dir: Path, results_dir: Path) -> None:
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _save_current_plot(filename: str) -> str:
-    """Save the current matplotlib figure into the shared plots directory."""
-    path = os.path.join(config.PLOTS_DIR, filename)
-    plt.tight_layout()
-    plt.savefig(path, dpi=200, bbox_inches="tight")
-    plt.close()
+def resolve_input(explicit: str | None, filename: str) -> Path:
+    """Resolve a dataset whether it sits in /data or the project root."""
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        if not p.exists():
+            raise FileNotFoundError(f"Dataset not found: {p}")
+        return p
+
+    candidates = [DEFAULT_DATA_DIR / filename, PROJECT_ROOT / filename, Path.cwd() / filename]
+    for p in candidates:
+        if p.exists():
+            return p.resolve()
+    raise FileNotFoundError(
+        f"Could not find {filename}. Looked in: " + ", ".join(str(p) for p in candidates)
+    )
+
+
+def validate_dataset(df: pd.DataFrame, name: str, target: str, current: str) -> None:
+    required = {ROAD_COL, LIFE_COL, DATE_COL, target, current}
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(f"{name} dataset is missing required columns: {missing}")
+    if df[target].isna().any():
+        raise ValueError(f"{name} dataset contains missing target values in {target}")
+
+
+def save_plot(fig: plt.Figure, plots_dir: Path, filename: str) -> Path:
+    path = plots_dir / filename
+    fig.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
     return path
 
 
-def _available(df: pd.DataFrame, columns: list[str]) -> list[str]:
-    return [c for c in columns if c in df.columns]
+def numeric_features(df: pd.DataFrame, target: str) -> list[str]:
+    cols = [c for c in CANDIDATE_NUMERIC_FEATURES if c in df.columns]
+    if target in df.columns:
+        cols.append(target)
+    # Keep only columns pandas genuinely sees as numeric or can mostly coerce.
+    out = []
+    for c in cols:
+        s = pd.to_numeric(df[c], errors="coerce")
+        if s.notna().sum() > 0:
+            out.append(c)
+    return list(dict.fromkeys(out))
 
 
-def _scatter_with_trend(df: pd.DataFrame, x: str, y: str, filename: str,
-                        xlabel: str | None = None, title: str | None = None) -> None:
-    """Scatter plot plus a simple linear trend line for visual EDA."""
-    data = df[[x, y]].replace([np.inf, -np.inf], np.nan).dropna()
-    if data.empty:
-        return
-
-    plt.figure(figsize=(8, 5.5))
-    plt.scatter(data[x], data[y], alpha=0.38, s=24)
-    if data[x].nunique() > 1:
-        slope, intercept = np.polyfit(data[x], data[y], 1)
-        x_line = np.linspace(data[x].min(), data[x].max(), 200)
-        plt.plot(x_line, slope * x_line + intercept, linewidth=2)
-    plt.xlabel(xlabel or x)
-    plt.ylabel("Future PCI (PCI_NEXT)")
-    plt.title(title or f"Future PCI vs {x}")
-    _save_current_plot(filename)
-
-
-def _iqr_outlier_summary(df: pd.DataFrame, numeric_cols: list[str]) -> pd.DataFrame:
-    """Flag potential extreme values using the conventional 1.5*IQR rule.
-
-    IQR flags are diagnostic only: an extreme value is not automatically an
-    error. Road, traffic and climate data can legitimately be skewed.
-    """
-    rows = []
-    for col in numeric_cols:
-        s = pd.to_numeric(df[col], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
-        if s.empty:
-            continue
-
-        q1 = s.quantile(0.25)
-        q3 = s.quantile(0.75)
-        iqr = q3 - q1
-        lower = q1 - 1.5 * iqr
-        upper = q3 + 1.5 * iqr
-        flagged = (s < lower) | (s > upper)
-
-        rows.append({
-            "variable": col,
-            "count_non_missing": int(s.size),
-            "min": float(s.min()),
-            "q1": float(q1),
-            "median": float(s.median()),
-            "q3": float(q3),
-            "max": float(s.max()),
-            "iqr_lower_bound": float(lower),
-            "iqr_upper_bound": float(upper),
-            "iqr_flag_count": int(flagged.sum()),
-            "iqr_flag_percent": float(flagged.mean() * 100),
-        })
-
-    return pd.DataFrame(rows).sort_values("iqr_flag_percent", ascending=False)
+# -----------------------------------------------------------------------------
+# Basic information, missingness and extremes
+# -----------------------------------------------------------------------------
+def dataset_overview(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    values = {
+        "dataset": name,
+        "observations": len(df),
+        "physical_roads": df[ROAD_COL].nunique(),
+        "pavement_lives": df[LIFE_COL].nunique(),
+        "variables": df.shape[1],
+        "duplicate_full_rows": int(df.duplicated().sum()),
+        "duplicate_road_date_rows": int(df.duplicated([ROAD_COL, DATE_COL]).sum()),
+    }
+    if SPLIT_COL in df.columns:
+        values["train_rows"] = int((df[SPLIT_COL] == "train").sum())
+        values["test_rows"] = int((df[SPLIT_COL] == "test").sum())
+    return pd.DataFrame([values])
 
 
-def _domain_quality_checks(df: pd.DataFrame) -> dict[str, int]:
-    """Simple impossible-value checks for variables with clear physical bounds."""
-    checks: dict[str, int] = {}
-
-    if "PCI_SCORE" in df:
-        checks["PCI_SCORE outside 0-100"] = int((~df["PCI_SCORE"].between(0, 100) & df["PCI_SCORE"].notna()).sum())
-    if config.TARGET_COL in df:
-        checks["PCI_NEXT outside 0-100"] = int((~df[config.TARGET_COL].between(0, 100) & df[config.TARGET_COL].notna()).sum())
-    if "PAVEMENT_AGE_YEARS" in df:
-        checks["negative pavement age"] = int((df["PAVEMENT_AGE_YEARS"] < 0).sum())
-    if "CUM_ESAL_AT_SURVEY" in df:
-        checks["negative cumulative ESAL"] = int((df["CUM_ESAL_AT_SURVEY"] < 0).sum())
-    if "ESAL_SINCE_LAST_SURVEY" in df:
-        checks["negative ESAL since last survey"] = int((df["ESAL_SINCE_LAST_SURVEY"] < 0).sum())
-    if "PRECIPITATION" in df:
-        checks["negative precipitation"] = int((df["PRECIPITATION"] < 0).sum())
-    for col in ["AC_THICKNESS_MM", "BASE_THICKNESS_MM", "SUBBASE_THICKNESS_MM", "TOTAL_PAV_THICKNESS_MM"]:
-        if col in df:
-            checks[f"negative {col}"] = int((df[col] < 0).sum())
-
-    return checks
-
-
-# ---------------------------------------------------------------------
-# EDA sections
-# ---------------------------------------------------------------------
-def dataset_overview(df: pd.DataFrame) -> pd.DataFrame:
-    """Save headline dataset information and variable types."""
-    summary_rows = [
-        {"metric": "observations", "value": len(df)},
-        {"metric": "physical_roads", "value": df[config.PHYSICAL_ROAD_ID_COL].nunique()},
-        {"metric": "pavement_lives", "value": df[config.ROAD_ID_COL].nunique()},
-        {"metric": "pavement_segments", "value": df[config.SEGMENT_ID_COL].nunique()},
-        {"metric": "variables", "value": df.shape[1]},
-        {"metric": "train_rows", "value": int((df[config.SPLIT_COL] == config.TRAIN_VALUE).sum())},
-        {"metric": "test_rows", "value": int((df[config.SPLIT_COL] == config.TEST_VALUE).sum())},
-        {"metric": "duplicate_full_rows", "value": int(df.duplicated().sum())},
-        {"metric": "duplicate_road_date_rows", "value": int(df.duplicated([config.ROAD_ID_COL, config.SURVEY_DATE_COL]).sum())},
-    ]
-    overview = pd.DataFrame(summary_rows)
-    overview.to_csv(OVERVIEW_PATH, index=False)
-
-    variable_types = pd.DataFrame({
+def variable_types_table(df: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
+    return pd.DataFrame({
+        "dataset": dataset_name,
         "variable": df.columns,
         "dtype": df.dtypes.astype(str).values,
         "non_missing": df.notna().sum().values,
         "missing": df.isna().sum().values,
+        "missing_percent": (df.isna().mean() * 100).values,
         "unique_values": df.nunique(dropna=True).values,
     })
-    variable_types.to_csv(os.path.join(config.RESULTS_DIR, "eda_variable_types.csv"), index=False)
-    return overview
 
 
-def descriptive_statistics(df: pd.DataFrame) -> pd.DataFrame:
-    """Save descriptive statistics for numeric modelling variables and target."""
-    cols = _available(df, config.NUMERIC_FEATURE_COLS + [config.TARGET_COL])
-    stats = df[cols].describe(percentiles=[0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]).T
-    stats.index.name = "variable"
-    stats.to_csv(DESCRIPTIVE_PATH)
+def descriptive_table(df: pd.DataFrame, dataset_name: str, target: str) -> pd.DataFrame:
+    cols = numeric_features(df, target)
+    stats = df[cols].apply(pd.to_numeric, errors="coerce").describe(
+        percentiles=[0.01, 0.05, 0.25, 0.50, 0.75, 0.95, 0.99]
+    ).T.reset_index(names="variable")
+    stats.insert(0, "dataset", dataset_name)
     return stats
 
 
-def missing_value_analysis(df: pd.DataFrame) -> pd.DataFrame:
-    """Quantify remaining missingness and create a missingness figure."""
-    missing = pd.DataFrame({
+def missing_table(df: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
+    out = pd.DataFrame({
+        "dataset": dataset_name,
         "variable": df.columns,
         "missing_count": df.isna().sum().values,
         "missing_percent": (df.isna().mean() * 100).values,
-    }).sort_values(["missing_percent", "variable"], ascending=[False, True])
-    missing.to_csv(MISSING_PATH, index=False)
-
-    plot_data = missing[missing["missing_count"] > 0].copy()
-    if not plot_data.empty:
-        plt.figure(figsize=(10, max(5, 0.32 * len(plot_data))))
-        y = np.arange(len(plot_data))
-        plt.barh(y, plot_data["missing_percent"])
-        plt.yticks(y, plot_data["variable"])
-        plt.xlabel("Missing values (%)")
-        plt.ylabel("")
-        plt.title("Remaining Missing Values in the Modelling Dataset")
-        _save_current_plot("eda_missing_values.png")
-
-    return missing
-
-
-def extreme_value_analysis(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Check potential outliers plus impossible values."""
-    numeric_cols = _available(df, config.NUMERIC_FEATURE_COLS + [config.TARGET_COL])
-    outliers = _iqr_outlier_summary(df, numeric_cols)
-    outliers.to_csv(OUTLIER_PATH, index=False)
-
-    top = outliers.head(15).sort_values("iqr_flag_percent", ascending=True)
-    if not top.empty:
-        plt.figure(figsize=(10, 7))
-        y = np.arange(len(top))
-        plt.barh(y, top["iqr_flag_percent"])
-        plt.yticks(y, top["variable"])
-        plt.xlabel("Observations flagged by 1.5×IQR rule (%)")
-        plt.ylabel("")
-        plt.title("Variables with the Most Potential Extreme Values")
-        _save_current_plot("eda_outlier_flags.png")
-
-    domain_checks = _domain_quality_checks(df)
-    pd.DataFrame(
-        [{"check": k, "flag_count": v} for k, v in domain_checks.items()]
-    ).to_csv(os.path.join(config.RESULTS_DIR, "eda_domain_quality_checks.csv"), index=False)
-
-    return outliers, domain_checks
-
-
-def rut_missingness_target_audit(df: pd.DataFrame) -> dict[str, float | int]:
-    """Audit whether missing rut-depth measurements are associated with PCI artifacts.
-
-    This is a data-quality diagnostic rather than a modelling step. Because
-    the PCI calculator uses rut depth when available, systematic PCI
-    differences between rows with and without rut measurements can indicate
-    that missingness is changing the scale of the generated PCI target.
-
-    The final modelling table drops each pavement life's terminal survey
-    (because it has no PCI_NEXT target), so next-survey rut status can only be
-    inferred where the next survey also remains as a feature row.
-    """
-    needed = {
-        "RUT_DEPTH_1_8IN", "PCI_SCORE", config.TARGET_COL,
-        config.SEGMENT_ID_COL, "SURVEY_SEQ_NO", "PAVEMENT_AGE_YEARS",
-    }
-    if not needed.issubset(df.columns):
-        return {}
-
-    work = df.copy()
-    work["RUT_DEPTH_MISSING"] = work["RUT_DEPTH_1_8IN"].isna()
-
-    current_summary = (
-        work.groupby("RUT_DEPTH_MISSING", dropna=False)
-        .agg(
-            rows=("PCI_SCORE", "size"),
-            mean_pci=("PCI_SCORE", "mean"),
-            median_pci=("PCI_SCORE", "median"),
-            mean_age=("PAVEMENT_AGE_YEARS", "mean"),
-            median_age=("PAVEMENT_AGE_YEARS", "median"),
-        )
-        .reset_index()
-    )
-    current_summary["rut_status"] = np.where(
-        current_summary["RUT_DEPTH_MISSING"], "missing", "recorded"
-    )
-    current_summary.to_csv(RUT_QUALITY_PATH, index=False)
-
-    recorded = work.loc[~work["RUT_DEPTH_MISSING"], "PCI_SCORE"].dropna()
-    missing = work.loc[work["RUT_DEPTH_MISSING"], "PCI_SCORE"].dropna()
-    if not recorded.empty and not missing.empty:
-        plt.figure(figsize=(7.5, 5.5))
-        plt.boxplot(
-            [recorded, missing],
-            showfliers=False,
-            **_boxplot_label_kwarg(["Rut depth recorded", "Rut depth missing"]),
-        )
-        plt.ylabel("Current PCI (PCI_SCORE)")
-        plt.title("PCI Distribution by Rut-Depth Availability")
-        _save_current_plot("eda_pci_by_rut_missingness.png")
-
-    ordered = work.sort_values([config.SEGMENT_ID_COL, "SURVEY_SEQ_NO"]).copy()
-    grp = ordered.groupby(config.SEGMENT_ID_COL, sort=False)
-    ordered["_NEXT_SEQ"] = grp["SURVEY_SEQ_NO"].shift(-1)
-    ordered["_NEXT_RUT_DEPTH"] = grp["RUT_DEPTH_1_8IN"].shift(-1)
-    ordered["_NEXT_ROW_AVAILABLE"] = ordered["_NEXT_SEQ"].eq(ordered["SURVEY_SEQ_NO"] + 1)
-    transitions = ordered.loc[ordered["_NEXT_ROW_AVAILABLE"]].copy()
-    transitions["NEXT_RUT_DEPTH_MISSING"] = transitions["_NEXT_RUT_DEPTH"].isna()
-    transitions["PCI_CHANGE_TO_NEXT"] = transitions[config.TARGET_COL] - transitions["PCI_SCORE"]
-    transitions["PCI_INCREASE_GT20"] = transitions["PCI_CHANGE_TO_NEXT"] > 20
-
-    transition_summary = (
-        transitions.groupby("NEXT_RUT_DEPTH_MISSING", dropna=False)
-        .agg(
-            transitions=("PCI_CHANGE_TO_NEXT", "size"),
-            mean_pci_change=("PCI_CHANGE_TO_NEXT", "mean"),
-            median_pci_change=("PCI_CHANGE_TO_NEXT", "median"),
-            increases_gt20=("PCI_INCREASE_GT20", "sum"),
-        )
-        .reset_index()
-    )
-    transition_summary["next_rut_status"] = np.where(
-        transition_summary["NEXT_RUT_DEPTH_MISSING"], "missing", "recorded"
-    )
-    transition_summary.to_csv(RUT_TRANSITION_PATH, index=False)
-
-    if not transitions.empty:
-        rec_change = transitions.loc[
-            ~transitions["NEXT_RUT_DEPTH_MISSING"], "PCI_CHANGE_TO_NEXT"
-        ].dropna()
-        miss_change = transitions.loc[
-            transitions["NEXT_RUT_DEPTH_MISSING"], "PCI_CHANGE_TO_NEXT"
-        ].dropna()
-        if not rec_change.empty and not miss_change.empty:
-            plt.figure(figsize=(7.5, 5.5))
-            plt.boxplot(
-                [rec_change, miss_change],
-                showfliers=False,
-                **_boxplot_label_kwarg(["Next rut recorded", "Next rut missing"]),
-            )
-            plt.axhline(0, linewidth=1)
-            plt.ylabel("PCI_NEXT − PCI_SCORE (points)")
-            plt.title("Apparent PCI Change by Next-Survey Rut Availability")
-            _save_current_plot("eda_pci_change_by_next_rut_missingness.png")
-
-    current_recorded = current_summary.loc[
-        ~current_summary["RUT_DEPTH_MISSING"], "mean_pci"
-    ]
-    current_missing = current_summary.loc[
-        current_summary["RUT_DEPTH_MISSING"], "mean_pci"
-    ]
-    age_recorded = current_summary.loc[
-        ~current_summary["RUT_DEPTH_MISSING"], "mean_age"
-    ]
-    age_missing = current_summary.loc[
-        current_summary["RUT_DEPTH_MISSING"], "mean_age"
-    ]
-
-    n_suspicious = int(transitions["PCI_INCREASE_GT20"].sum())
-    n_suspicious_next_missing = int(
-        (transitions["PCI_INCREASE_GT20"] & transitions["NEXT_RUT_DEPTH_MISSING"]).sum()
-    )
-
-    return {
-        "rut_missing_rows": int(work["RUT_DEPTH_MISSING"].sum()),
-        "rut_missing_percent": float(work["RUT_DEPTH_MISSING"].mean() * 100),
-        "mean_pci_rut_recorded": float(current_recorded.iloc[0]) if not current_recorded.empty else np.nan,
-        "mean_pci_rut_missing": float(current_missing.iloc[0]) if not current_missing.empty else np.nan,
-        "mean_age_rut_recorded": float(age_recorded.iloc[0]) if not age_recorded.empty else np.nan,
-        "mean_age_rut_missing": float(age_missing.iloc[0]) if not age_missing.empty else np.nan,
-        "auditable_transitions": int(len(transitions)),
-        "mean_change_next_rut_recorded": float(
-            transitions.loc[~transitions["NEXT_RUT_DEPTH_MISSING"], "PCI_CHANGE_TO_NEXT"].mean()
-        ),
-        "mean_change_next_rut_missing": float(
-            transitions.loc[transitions["NEXT_RUT_DEPTH_MISSING"], "PCI_CHANGE_TO_NEXT"].mean()
-        ),
-        "pci_increases_gt20": n_suspicious,
-        "pci_increases_gt20_next_rut_missing": n_suspicious_next_missing,
-        "pci_increases_gt20_next_rut_missing_percent": (
-            float(n_suspicious_next_missing / n_suspicious * 100) if n_suspicious else np.nan
-        ),
-    }
-
-
-def pci_distribution_plots(df: pd.DataFrame) -> None:
-    """Plot current and future PCI distributions."""
-    for col, filename, label in [
-        ("PCI_SCORE", "eda_pci_distribution.png", "Current PCI (PCI_SCORE)"),
-        (config.TARGET_COL, "eda_pci_next_distribution.png", "Future PCI (PCI_NEXT)"),
-    ]:
-        if col not in df:
-            continue
-        values = df[col].dropna()
-        plt.figure(figsize=(8, 5.5))
-        plt.hist(values, bins=20, alpha=0.8)
-        plt.axvline(values.mean(), linestyle="--", linewidth=1.5, label=f"Mean = {values.mean():.1f}")
-        plt.axvline(values.median(), linestyle=":", linewidth=1.5, label=f"Median = {values.median():.1f}")
-        plt.xlabel(label)
-        plt.ylabel("Observations")
-        plt.title(f"Distribution of {label}")
-        plt.legend()
-        _save_current_plot(filename)
-
-
-def relationship_plots(df: pd.DataFrame) -> None:
-    """Required future-PCI relationship plots for the agreed feature groups."""
-    plot_specs = [
-        ("PAVEMENT_AGE_YEARS", "eda_pci_vs_pavement_age.png", "Pavement age (years)", "Future PCI vs Pavement Age"),
-        ("CUM_ESAL_AT_SURVEY", "eda_pci_vs_cumulative_esal.png", "Cumulative ESAL at survey", "Future PCI vs Cumulative Traffic Loading"),
-        ("ESAL_SINCE_LAST_SURVEY", "eda_pci_vs_recent_esal.png", "ESAL since last survey", "Future PCI vs Recent Traffic Loading"),
-        ("TEMP_AVG", "eda_pci_vs_temperature.png", "Average temperature", "Future PCI vs Average Temperature"),
-        ("PRECIPITATION", "eda_pci_vs_precipitation.png", "Precipitation", "Future PCI vs Precipitation"),
-        ("AC_THICKNESS_MM", "eda_pci_vs_ac_thickness.png", "AC thickness (mm)", "Future PCI vs Asphalt Thickness"),
-        ("TOTAL_PAV_THICKNESS_MM", "eda_pci_vs_total_thickness.png", "Total pavement thickness (mm)", "Future PCI vs Total Pavement Thickness"),
-        ("PCI_SCORE", "eda_pci_current_vs_future.png", "Current PCI (PCI_SCORE)", "Future PCI vs Current PCI"),
-    ]
-    for x, filename, xlabel, title in plot_specs:
-        if x in df.columns and config.TARGET_COL in df.columns:
-            _scatter_with_trend(df, x, config.TARGET_COL, filename, xlabel, title)
-
-
-def correlation_analysis(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Compute numeric correlations and rank variables against PCI_NEXT.
-
-    Pearson is used for the matrix because it is the conventional linear
-    correlation summary. Spearman is included in the ranking to also reveal
-    monotonic relationships that are not perfectly linear.
-    """
-    # Only genuine model inputs + target. Deliberately excludes identifiers,
-    # dates, SPLIT and target-adjacent future-survey timing columns to avoid
-    # presenting leakage variables as useful predictors.
-    numeric_cols = _available(df, config.NUMERIC_FEATURE_COLS + [config.TARGET_COL])
-    numeric = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
-
-    pearson = numeric.corr(method="pearson")
-    pearson.to_csv(CORRELATION_PATH)
-
-    spearman = numeric.corr(method="spearman")
-    target_rank = pd.DataFrame({
-        "variable": [c for c in numeric_cols if c != config.TARGET_COL],
-        "pearson_r": [pearson.loc[c, config.TARGET_COL] for c in numeric_cols if c != config.TARGET_COL],
-        "spearman_rho": [spearman.loc[c, config.TARGET_COL] for c in numeric_cols if c != config.TARGET_COL],
     })
-    target_rank["abs_pearson_r"] = target_rank["pearson_r"].abs()
-    target_rank["abs_spearman_rho"] = target_rank["spearman_rho"].abs()
-    target_rank = target_rank.sort_values("abs_pearson_r", ascending=False).reset_index(drop=True)
-    target_rank.to_csv(TARGET_CORRELATION_PATH, index=False)
-
-    # A focused matrix is easier to read than plotting every numeric column.
-    # Include the target plus the 14 strongest Pearson relationships.
-    strongest = target_rank.head(14)["variable"].tolist()
-    heatmap_cols = [config.TARGET_COL] + strongest
-    heatmap_corr = numeric[heatmap_cols].corr(method="pearson")
-
-    plt.figure(figsize=(12, 10))
-    image = plt.imshow(heatmap_corr.values, aspect="auto", vmin=-1, vmax=1)
-    plt.colorbar(image, label="Pearson correlation")
-    plt.xticks(np.arange(len(heatmap_cols)), heatmap_cols, rotation=90)
-    plt.yticks(np.arange(len(heatmap_cols)), heatmap_cols)
-    for i in range(len(heatmap_cols)):
-        for j in range(len(heatmap_cols)):
-            plt.text(j, i, f"{heatmap_corr.iloc[i, j]:.2f}", ha="center", va="center", fontsize=7)
-    plt.title("Correlation Matrix — Future PCI and Strongest Numeric Relationships")
-    _save_current_plot("eda_correlation_matrix.png")
-
-    # Direct ranking plot makes variable selection evidence report-ready.
-    top_rank = target_rank.head(12).sort_values("pearson_r")
-    plt.figure(figsize=(9, 6.5))
-    y = np.arange(len(top_rank))
-    plt.barh(y, top_rank["pearson_r"])
-    plt.yticks(y, top_rank["variable"])
-    plt.axvline(0, linewidth=1)
-    plt.xlabel("Pearson correlation with PCI_NEXT")
-    plt.ylabel("")
-    plt.title("Numeric Variables Most Related to Future PCI")
-    _save_current_plot("eda_pci_next_correlations.png")
-
-    return pearson, target_rank
+    out["interpretation"] = np.where(
+        out["variable"].isin(EXPECTED_STRUCTURAL_MISSING),
+        "partly expected for first/interval survey features",
+        np.where(out["missing_count"] > 0, "review / source-data missingness", "complete"),
+    )
+    return out.sort_values(["missing_percent", "variable"], ascending=[False, True])
 
 
-def write_summary(df: pd.DataFrame, missing: pd.DataFrame,
-                  outliers: pd.DataFrame, domain_checks: dict[str, int],
-                  target_rank: pd.DataFrame,
-                  rut_audit: dict[str, float | int]) -> str:
-    """Write a concise, data-driven findings summary for the project report."""
-    current = df["PCI_SCORE"].dropna()
-    future = df[config.TARGET_COL].dropna()
-    missing_nonzero = missing[missing["missing_count"] > 0]
-    top_missing = missing_nonzero.head(8)
-    strongest = target_rank.head(8)
+def iqr_outliers(df: pd.DataFrame, dataset_name: str, target: str) -> pd.DataFrame:
+    rows = []
+    for col in numeric_features(df, target):
+        s = pd.to_numeric(df[col], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        if s.empty:
+            continue
+        q1, q3 = s.quantile([0.25, 0.75])
+        iqr = q3 - q1
+        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        flagged = (s < lo) | (s > hi)
+        rows.append({
+            "dataset": dataset_name,
+            "variable": col,
+            "non_missing": len(s),
+            "min": s.min(), "q1": q1, "median": s.median(), "q3": q3, "max": s.max(),
+            "iqr_lower_bound": lo, "iqr_upper_bound": hi,
+            "iqr_flag_count": int(flagged.sum()),
+            "iqr_flag_percent": float(flagged.mean() * 100),
+        })
+    return pd.DataFrame(rows).sort_values("iqr_flag_percent", ascending=False)
 
-    current_future_r = df[["PCI_SCORE", config.TARGET_COL]].corr().iloc[0, 1]
-    future_change = future.mean() - current.mean()
-    impossible_total = sum(domain_checks.values())
 
-    lines = [
-        "# EDA & Data-Quality Summary",
-        "",
-        "## Dataset overview",
-        f"- The final modelling dataset contains **{len(df):,} observations**, "
-        f"**{df[config.PHYSICAL_ROAD_ID_COL].nunique():,} physical roads**, "
-        f"and **{df[config.ROAD_ID_COL].nunique():,} pavement lives**.",
-        f"- The provided split contains **{(df[config.SPLIT_COL] == config.TRAIN_VALUE).sum():,} training rows** "
-        f"and **{(df[config.SPLIT_COL] == config.TEST_VALUE).sum():,} test rows**.",
-        f"- There are **{df.shape[1]} variables** in the final dataset and **{df.duplicated().sum()} exact duplicate rows**.",
-        "",
-        "## PCI distribution",
-        f"- Current PCI (`PCI_SCORE`) has mean **{current.mean():.2f}**, median **{current.median():.2f}**, "
-        f"and range **{current.min():.2f}–{current.max():.2f}**.",
-        f"- Future PCI (`PCI_NEXT`) has mean **{future.mean():.2f}**, median **{future.median():.2f}**, "
-        f"and range **{future.min():.2f}–{future.max():.2f}**.",
-        f"- Mean future PCI is **{abs(future_change):.2f} points {'lower' if future_change < 0 else 'higher'}** than mean current PCI, "
-        "which is consistent with condition changing between surveys rather than remaining constant.",
-        "",
-        "## Missing values and data quality",
-        f"- `PCI_NEXT` has **{df[config.TARGET_COL].isna().sum()} missing values**, so every modelling row has a usable target.",
+def domain_checks(df: pd.DataFrame, dataset_name: str, target: str, current: str) -> pd.DataFrame:
+    checks: list[dict] = []
+
+    def add(label: str, mask: pd.Series) -> None:
+        checks.append({"dataset": dataset_name, "check": label, "flag_count": int(mask.fillna(False).sum())})
+
+    if current == PCI_CURRENT:
+        add("PCI_SCORE outside 0-100", df[PCI_CURRENT].notna() & ~pd.to_numeric(df[PCI_CURRENT], errors="coerce").between(0, 100))
+        add("PCI_NEXT outside 0-100", df[target].notna() & ~pd.to_numeric(df[target], errors="coerce").between(0, 100))
+    if current == RUT_CURRENT:
+        add("negative current rut depth", pd.to_numeric(df[current], errors="coerce") < 0)
+        add("negative future rut depth", pd.to_numeric(df[target], errors="coerce") < 0)
+
+    for col, label in [
+        ("PAVEMENT_AGE_YEARS", "negative pavement age"),
+        ("CUM_ESAL_AT_SURVEY", "negative cumulative ESAL"),
+        ("ESAL_SINCE_LAST_SURVEY", "negative ESAL since last survey"),
+        ("PRECIPITATION", "negative precipitation"),
+        ("AC_THICKNESS_MM", "negative AC thickness"),
+        ("BASE_THICKNESS_MM", "negative base thickness"),
+        ("SUBBASE_THICKNESS_MM", "negative subbase thickness"),
+        ("TOTAL_PAV_THICKNESS_MM", "negative total pavement thickness"),
+    ]:
+        if col in df.columns:
+            add(label, pd.to_numeric(df[col], errors="coerce") < 0)
+    return pd.DataFrame(checks)
+
+
+# -----------------------------------------------------------------------------
+# Plots and correlations
+# -----------------------------------------------------------------------------
+def distribution_plot(df: pd.DataFrame, current: str, target: str, label: str,
+                      prefix: str, plots_dir: Path) -> None:
+    for col, suffix, title in [
+        (current, "current_distribution", f"Distribution of current {label}"),
+        (target, "future_distribution", f"Distribution of future {label}"),
+    ]:
+        s = pd.to_numeric(df[col], errors="coerce").dropna()
+        fig, ax = plt.subplots(figsize=(8, 5.5))
+        ax.hist(s, bins=30, edgecolor="black", linewidth=0.5)
+        ax.axvline(s.mean(), linestyle="--", linewidth=1.5, label=f"Mean = {s.mean():.2f}")
+        ax.axvline(s.median(), linestyle=":", linewidth=1.5, label=f"Median = {s.median():.2f}")
+        ax.set_xlabel(label)
+        ax.set_ylabel("Count")
+        ax.set_title(title)
+        ax.legend()
+        save_plot(fig, plots_dir, f"{prefix}_{suffix}.png")
+
+
+def scatter_with_trend(df: pd.DataFrame, x: str, y: str, y_label: str,
+                       x_label: str, filename: str, plots_dir: Path) -> None:
+    data = df[[x, y]].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if data.empty:
+        return
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    ax.scatter(data[x], data[y], alpha=0.38, s=22)
+    if data[x].nunique() > 1:
+        slope, intercept = np.polyfit(data[x], data[y], 1)
+        xx = np.linspace(data[x].min(), data[x].max(), 200)
+        ax.plot(xx, slope * xx + intercept, linewidth=2)
+    r = data[x].corr(data[y])
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_title(f"{y_label} vs {x_label} (Pearson r = {r:.3f})")
+    save_plot(fig, plots_dir, filename)
+
+
+def relationship_plots(df: pd.DataFrame, target: str, target_label: str,
+                       prefix: str, plots_dir: Path) -> None:
+    for col, x_label, slug in RELATIONSHIP_FEATURES:
+        if col in df.columns:
+            scatter_with_trend(
+                df, col, target, target_label, x_label,
+                f"{prefix}_vs_{slug}.png", plots_dir
+            )
+
+
+def correlation_outputs(df: pd.DataFrame, dataset_name: str, target: str,
+                        prefix: str, plots_dir: Path, results_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    cols = numeric_features(df, target)
+    numeric = df[cols].apply(pd.to_numeric, errors="coerce")
+    corr = numeric.corr(method="pearson")
+    corr.to_csv(results_dir / f"{prefix}_correlation_matrix.csv")
+
+    fig, ax = plt.subplots(figsize=(13, 11))
+    im = ax.imshow(corr.values, vmin=-1, vmax=1, aspect="auto")
+    fig.colorbar(im, ax=ax, label="Pearson correlation")
+    ax.set_xticks(range(len(corr.columns)))
+    ax.set_xticklabels(corr.columns, rotation=90, fontsize=7)
+    ax.set_yticks(range(len(corr.index)))
+    ax.set_yticklabels(corr.index, fontsize=7)
+    ax.set_title(f"{dataset_name} numeric correlation matrix")
+    save_plot(fig, plots_dir, f"{prefix}_correlation_matrix.png")
+
+    rows = []
+    for col in cols:
+        if col == target:
+            continue
+        pair = numeric[[col, target]].dropna()
+        if len(pair) < 3 or pair[col].nunique() < 2:
+            continue
+        pearson = pair[col].corr(pair[target])
+        if spearmanr is not None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                sp = spearmanr(pair[col], pair[target], nan_policy="omit").statistic
+        else:
+            sp = pair[col].corr(pair[target], method="spearman")
+        rows.append({
+            "dataset": dataset_name,
+            "variable": col,
+            "n_pairwise": len(pair),
+            "pearson_r": pearson,
+            "spearman_rho": sp,
+            "abs_pearson_r": abs(pearson) if pd.notna(pearson) else np.nan,
+            "abs_spearman_rho": abs(sp) if pd.notna(sp) else np.nan,
+        })
+    ranking = pd.DataFrame(rows).sort_values("abs_pearson_r", ascending=False)
+    ranking.to_csv(results_dir / f"{prefix}_target_correlations.csv", index=False)
+
+    top = ranking.head(15).sort_values("pearson_r")
+    if not top.empty:
+        fig, ax = plt.subplots(figsize=(9, 7))
+        ax.barh(top["variable"], top["pearson_r"])
+        ax.axvline(0, linewidth=0.8)
+        ax.set_xlabel(f"Pearson correlation with {target}")
+        ax.set_title(f"Variables most related to {target}")
+        save_plot(fig, plots_dir, f"{prefix}_target_correlations.png")
+    return corr, ranking
+
+
+def missing_plot(missing: pd.DataFrame, prefix: str, dataset_name: str, plots_dir: Path) -> None:
+    p = missing[missing["missing_count"] > 0].head(20).sort_values("missing_percent")
+    if p.empty:
+        return
+    fig, ax = plt.subplots(figsize=(9, max(5, 0.32 * len(p))))
+    ax.barh(p["variable"], p["missing_percent"])
+    ax.set_xlabel("Missing values (%)")
+    ax.set_title(f"{dataset_name}: variables with missing values")
+    save_plot(fig, plots_dir, f"{prefix}_missing_values.png")
+
+
+def outlier_plot(outliers: pd.DataFrame, prefix: str, dataset_name: str, plots_dir: Path) -> None:
+    p = outliers.head(15).sort_values("iqr_flag_percent")
+    if p.empty:
+        return
+    fig, ax = plt.subplots(figsize=(9, 7))
+    ax.barh(p["variable"], p["iqr_flag_percent"])
+    ax.set_xlabel("Rows flagged by 1.5×IQR rule (%)")
+    ax.set_title(f"{dataset_name}: potential extreme-value flags")
+    save_plot(fig, plots_dir, f"{prefix}_outlier_flags.png")
+
+
+# -----------------------------------------------------------------------------
+# Direct PCI-vs-rutting comparison
+# -----------------------------------------------------------------------------
+def compare_pci_rut(pci: pd.DataFrame, rut: pd.DataFrame,
+                    pci_rank: pd.DataFrame, rut_rank: pd.DataFrame,
+                    plots_dir: Path, results_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    keys = [ROAD_COL, DATE_COL]
+    pci_cols = keys + [PCI_CURRENT, PCI_TARGET, "YEARS_TO_NEXT_SURVEY"]
+    rut_cols = keys + [RUT_CURRENT, RUT_TARGET, "YEARS_TO_NEXT_SURVEY"]
+    pci_m = pci[[c for c in pci_cols if c in pci.columns]].copy()
+    rut_m = rut[[c for c in rut_cols if c in rut.columns]].copy()
+    merged = pci_m.merge(rut_m, on=keys, how="inner", suffixes=("_PCI", "_RUT"))
+
+    for c in [PCI_CURRENT, PCI_TARGET, RUT_CURRENT, RUT_TARGET]:
+        merged[c] = pd.to_numeric(merged[c], errors="coerce")
+
+    merged["PCI_CHANGE_TO_NEXT"] = merged[PCI_TARGET] - merged[PCI_CURRENT]
+    merged["RUT_CHANGE_TO_NEXT"] = merged[RUT_TARGET] - merged[RUT_CURRENT]
+    merged["PCI_DETERIORATED"] = merged["PCI_CHANGE_TO_NEXT"] < 0
+    merged["RUT_DETERIORATED"] = merged["RUT_CHANGE_TO_NEXT"] > 0
+
+    # Use PCI horizon if present; the paired target is the same next pavement-life survey
+    horizon_col = "YEARS_TO_NEXT_SURVEY_PCI" if "YEARS_TO_NEXT_SURVEY_PCI" in merged.columns else "YEARS_TO_NEXT_SURVEY"
+    horizon = pd.to_numeric(merged[horizon_col], errors="coerce") if horizon_col in merged.columns else pd.Series(np.nan, index=merged.index)
+    good_horizon = horizon > 0
+    merged["PCI_DETERIORATION_PER_YEAR"] = np.where(good_horizon, -merged["PCI_CHANGE_TO_NEXT"] / horizon, np.nan)
+    merged["RUT_DETERIORATION_PER_YEAR"] = np.where(good_horizon, merged["RUT_CHANGE_TO_NEXT"] / horizon, np.nan)
+
+    merged.to_csv(results_dir / "eda_pci_rut_matched_pairs.csv", index=False)
+
+    current_corr = merged[[PCI_CURRENT, RUT_CURRENT]].dropna().corr().iloc[0, 1] if len(merged) else np.nan
+    future_corr = merged[[PCI_TARGET, RUT_TARGET]].dropna().corr().iloc[0, 1] if len(merged) else np.nan
+    change_corr = merged[["PCI_CHANGE_TO_NEXT", "RUT_CHANGE_TO_NEXT"]].dropna().corr().iloc[0, 1] if len(merged) else np.nan
+    rate_corr = merged[["PCI_DETERIORATION_PER_YEAR", "RUT_DETERIORATION_PER_YEAR"]].dropna().corr().iloc[0, 1] if len(merged) else np.nan
+
+    both = int((merged["PCI_DETERIORATED"] & merged["RUT_DETERIORATED"]).sum())
+    pci_only = int((merged["PCI_DETERIORATED"] & ~merged["RUT_DETERIORATED"]).sum())
+    rut_only = int((~merged["PCI_DETERIORATED"] & merged["RUT_DETERIORATED"]).sum())
+    neither = int((~merged["PCI_DETERIORATED"] & ~merged["RUT_DETERIORATED"]).sum())
+
+    comp = pd.DataFrame([
+        {"metric": "matched road-survey current-to-next pairs", "value": len(merged)},
+        {"metric": "current PCI vs current rut Pearson r", "value": current_corr},
+        {"metric": "future PCI vs future rut Pearson r", "value": future_corr},
+        {"metric": "raw change correlation (PCI change vs rut change)", "value": change_corr},
+        {"metric": "deterioration-rate correlation per year", "value": rate_corr},
+        {"metric": "both measures deteriorated", "value": both},
+        {"metric": "PCI deteriorated only", "value": pci_only},
+        {"metric": "rut deteriorated only", "value": rut_only},
+        {"metric": "neither deteriorated", "value": neither},
+    ])
+    comp.to_csv(results_dir / "eda_pci_rut_comparison_summary.csv", index=False)
+
+    if len(merged):
+        fig, ax = plt.subplots(figsize=(8, 5.5))
+        ax.scatter(merged[RUT_CURRENT], merged[PCI_CURRENT], alpha=0.4, s=22)
+        ax.set_xlabel("Current rut depth (1/8 inch)")
+        ax.set_ylabel("Current PCI")
+        ax.set_title(f"Current PCI vs rut depth (r = {current_corr:.3f})")
+        save_plot(fig, plots_dir, "eda_pci_vs_rut_current.png")
+
+        fig, ax = plt.subplots(figsize=(8, 5.5))
+        ax.scatter(merged["RUT_DETERIORATION_PER_YEAR"], merged["PCI_DETERIORATION_PER_YEAR"], alpha=0.4, s=22)
+        ax.axhline(0, linewidth=0.8)
+        ax.axvline(0, linewidth=0.8)
+        ax.set_xlabel("Rutting deterioration per year (increase in 1/8 inch/year)")
+        ax.set_ylabel("PCI deterioration per year (PCI points/year)")
+        ax.set_title(f"PCI vs rutting deterioration rate (r = {rate_corr:.3f})")
+        save_plot(fig, plots_dir, "eda_pci_vs_rut_deterioration_rate.png")
+
+    # Compare shared factor correlations side by side. Exclude the other condition measure
+    # and lag measures that are target-specific so the comparison focuses on common drivers.
+    p = pci_rank[["variable", "pearson_r", "abs_pearson_r"]].rename(
+        columns={"pearson_r": "pci_target_r", "abs_pearson_r": "pci_abs_r"}
+    )
+    r = rut_rank[["variable", "pearson_r", "abs_pearson_r"]].rename(
+        columns={"pearson_r": "rut_target_r", "abs_pearson_r": "rut_abs_r"}
+    )
+    factors = p.merge(r, on="variable", how="inner")
+    excluded = {PCI_CURRENT, RUT_CURRENT, "PCI_PREV", "PCI_CHANGE_SINCE_LAST", "RUT_PREV", "RUT_CHANGE_SINCE_LAST"}
+    factors = factors[~factors["variable"].isin(excluded)].copy()
+    factors["same_sign"] = np.sign(factors["pci_target_r"]) == np.sign(factors["rut_target_r"])
+    factors["mean_abs_r"] = (factors["pci_abs_r"] + factors["rut_abs_r"]) / 2
+    factors = factors.sort_values("mean_abs_r", ascending=False)
+    factors.to_csv(results_dir / "eda_shared_factor_comparison.csv", index=False)
+
+    top_n = 10
+    pci_top = set(factors.nlargest(top_n, "pci_abs_r")["variable"])
+    rut_top = set(factors.nlargest(top_n, "rut_abs_r")["variable"])
+    overlap = pci_top & rut_top
+    metrics = {
+        "matched_pairs": len(merged),
+        "current_corr": current_corr,
+        "future_corr": future_corr,
+        "change_corr": change_corr,
+        "rate_corr": rate_corr,
+        "both_deteriorated": both,
+        "pci_only": pci_only,
+        "rut_only": rut_only,
+        "neither": neither,
+        "top10_shared_factor_overlap_count": len(overlap),
+        "top10_shared_factor_overlap": sorted(overlap),
+    }
+    return merged, factors, metrics
+
+
+# -----------------------------------------------------------------------------
+# Summary writer
+# -----------------------------------------------------------------------------
+def top_corr_lines(rank: pd.DataFrame, n: int = 8) -> list[str]:
+    lines = []
+    for _, row in rank.head(n).iterrows():
+        lines.append(
+            f"- `{row['variable']}`: Pearson r = {row['pearson_r']:.3f}; "
+            f"Spearman rho = {row['spearman_rho']:.3f} (n={int(row['n_pairwise'])})."
+        )
+    return lines
+
+
+def write_summary(pci: pd.DataFrame, rut: pd.DataFrame,
+                  pci_missing: pd.DataFrame, rut_missing: pd.DataFrame,
+                  pci_domain: pd.DataFrame, rut_domain: pd.DataFrame,
+                  pci_rank: pd.DataFrame, rut_rank: pd.DataFrame,
+                  comp_metrics: dict, factors: pd.DataFrame,
+                  results_dir: Path) -> str:
+    pci_p = pd.to_numeric(pci[PCI_CURRENT], errors="coerce")
+    pci_n = pd.to_numeric(pci[PCI_TARGET], errors="coerce")
+    rut_p = pd.to_numeric(rut[RUT_CURRENT], errors="coerce")
+    rut_n = pd.to_numeric(rut[RUT_TARGET], errors="coerce")
+
+    pci_missing_nonzero = pci_missing[pci_missing["missing_count"] > 0]
+    rut_missing_nonzero = rut_missing[rut_missing["missing_count"] > 0]
+    impossible_total = int(pci_domain["flag_count"].sum() + rut_domain["flag_count"].sum())
+
+    top_shared = factors.head(8)
+    factor_lines = [
+        f"- `{r.variable}`: r with PCI_NEXT = {r.pci_target_r:.3f}; r with RUT_NEXT = {r.rut_target_r:.3f}."
+        for r in top_shared.itertuples()
     ]
 
-    if top_missing.empty:
-        lines.append("- No missing values remain in the dataset.")
-    else:
-        lines.append("- Missingness is concentrated in a small set of variables. The largest gaps are:")
-        for _, row in top_missing.iterrows():
-            lines.append(f"  - `{row['variable']}`: **{int(row['missing_count']):,} ({row['missing_percent']:.1f}%)**")
-        lines.append("- Some missing values are structurally expected: lagged fields are unavailable for the first survey in a pavement life, and patch timing is unavailable where no prior patch is recorded.")
+    total_matched = max(comp_metrics.get("matched_pairs", 0), 1)
+    both_pct = comp_metrics.get("both_deteriorated", 0) / total_matched * 100
+    pci_only_pct = comp_metrics.get("pci_only", 0) / total_matched * 100
+    rut_only_pct = comp_metrics.get("rut_only", 0) / total_matched * 100
+    neither_pct = comp_metrics.get("neither", 0) / total_matched * 100
 
-    lines.extend([
-        f"- Simple impossible-value checks found **{impossible_total}** values violating clear bounds "
-        "(PCI outside 0–100, negative age/traffic/precipitation/thickness).",
-        "- The IQR analysis flags statistical extremes for review, but these are not automatically treated as errors because traffic, climate and pavement-structure variables can legitimately be skewed.",
-    ])
+    text = f"""# EDA v2 — PCI and Rutting Data-Quality Summary
 
-    if rut_audit:
-        pci_gap = rut_audit["mean_pci_rut_missing"] - rut_audit["mean_pci_rut_recorded"]
-        lines.extend([
-            "",
-            "## Important PCI target-quality warning",
-            f"- `RUT_DEPTH_1_8IN` is missing in **{rut_audit['rut_missing_rows']:,} of {len(df):,} rows "
-            f"({rut_audit['rut_missing_percent']:.1f}%)**.",
-            f"- Rows with a recorded rut depth have mean current PCI **{rut_audit['mean_pci_rut_recorded']:.1f}**, "
-            f"while rows with missing rut depth have mean current PCI **{rut_audit['mean_pci_rut_missing']:.1f}** "
-            f"(a **{pci_gap:.1f}-point gap**), despite similar mean pavement ages "
-            f"(**{rut_audit['mean_age_rut_recorded']:.1f}** vs **{rut_audit['mean_age_rut_missing']:.1f}** years).",
-            f"- For the **{rut_audit['auditable_transitions']:,}** transitions where the next survey row is still present "
-            "in the final modelling table, mean apparent PCI change is "
-            f"**{rut_audit['mean_change_next_rut_recorded']:.1f} points** when the next rut measurement is recorded "
-            f"versus **{rut_audit['mean_change_next_rut_missing']:+.1f} points** when it is missing.",
-            f"- Of **{rut_audit['pci_increases_gt20']:,}** apparent PCI improvements greater than 20 points in those auditable "
-            f"transitions, **{rut_audit['pci_increases_gt20_next_rut_missing']:,} "
-            f"({rut_audit['pci_increases_gt20_next_rut_missing_percent']:.1f}%)** occur when the next survey's rut depth is missing.",
-            "- This is a serious data-quality warning: the generated PCI appears systematically associated with rut-depth missingness. "
-            "The team should resolve the upstream missing-rut handling and regenerate the modelling dataset before finalising model-accuracy claims.",
-        ])
+## 1. Dataset overview
 
-    lines.extend([
-        "",
-        "## Relationships with future PCI",
-        f"- Current PCI is the strongest direct numeric relationship with future PCI: **Pearson r = {current_future_r:.3f}**.",
-        "- The strongest numeric relationships with `PCI_NEXT` in this dataset are:",
-    ])
-    for _, row in strongest.iterrows():
-        lines.append(
-            f"  - `{row['variable']}`: Pearson **{row['pearson_r']:.3f}**, "
-            f"Spearman **{row['spearman_rho']:.3f}**"
-        )
+The client-requested v2 rebuild now treats distress-only PCI and rut depth as separate condition measures.
 
-    age_row = target_rank[target_rank["variable"] == "PAVEMENT_AGE_YEARS"]
-    if not age_row.empty:
-        age_r = age_row.iloc[0]["pearson_r"]
-        lines.append(
-            f"- Pavement age alone has a relatively {'weak' if abs(age_r) < 0.3 else 'moderate/strong'} linear relationship "
-            f"with future PCI (**r = {age_r:.3f}**), so age should not be treated as a sufficient predictor by itself."
-        )
+- **PCI dataset:** {len(pci):,} current-to-next observations, {pci[ROAD_COL].nunique():,} physical roads, {pci[LIFE_COL].nunique():,} pavement lives, {pci.shape[1]} variables.
+- **Rutting dataset:** {len(rut):,} current-to-next observations, {rut[ROAD_COL].nunique():,} physical roads, {rut[LIFE_COL].nunique():,} pavement lives, {rut.shape[1]} variables.
+- Both modelling targets are complete: missing `{PCI_TARGET}` = {pci[PCI_TARGET].isna().sum()}, missing `{RUT_TARGET}` = {rut[RUT_TARGET].isna().sum()}.
 
-    lines.extend([
-        "- Correlation measures association, not causation. Weak Pearson correlation does not mean a feature is useless: tree-based models can exploit nonlinear relationships and interactions between traffic, climate, structure and current condition.",
-        "",
-        "## Modelling implication",
-        "The EDA supports retaining the agreed multi-factor feature set rather than relying on pavement age alone. Current condition variables provide the clearest direct signal, while traffic, climate, pavement structure, maintenance and lagged-history variables may add nonlinear or interaction effects that are not fully captured by pairwise correlation.",
-        "",
-        "Generated automatically by `src/eda.py` from `data/model_dataset.csv`.",
-    ])
+## 2. Distribution check
 
-    text = "\n".join(lines) + "\n"
-    Path(config.EDA_SUMMARY_PATH).write_text(text, encoding="utf-8")
+The distress-only PCI distribution has one clear dominant high-condition peak rather than the separated two-group pattern seen when rutting was incorrectly merged into PCI. In the v2 PCI modelling table, current PCI has mean **{pci_p.mean():.2f}**, median **{pci_p.median():.2f}**, and range **{pci_p.min():.1f}–{pci_p.max():.1f}**. Future PCI has mean **{pci_n.mean():.2f}** and median **{pci_n.median():.2f}**. This supports the Review 1 conclusion that the old bimodality was a calculation artefact linked to rutting availability, not a true two-population PCI pattern.
+
+Rutting is now analysed on its own scale. Current rut depth has mean **{rut_p.mean():.2f} eighths of an inch**, median **{rut_p.median():.2f}**, and range **{rut_p.min():.1f}–{rut_p.max():.1f}**. Future rut depth has mean **{rut_n.mean():.2f}** and median **{rut_n.median():.2f}**.
+
+## 3. Missing values and data quality
+
+- PCI dataset: {len(pci_missing_nonzero)} variables contain at least one missing value.
+- Rutting dataset: {len(rut_missing_nonzero)} variables contain at least one missing value.
+- `DAYS_SINCE_LAST_PATCH` is highly sparse in both datasets; this should be treated carefully because absence can mean no recorded prior patch rather than a random missing measurement.
+- Lag/interval variables such as previous-condition fields and time since prior survey are structurally missing for first observations and are therefore not automatically data errors.
+- The simple physical/domain checks found **{impossible_total}** impossible values across the checked PCI/rut bounds, negative age, negative ESAL, negative precipitation and negative thickness conditions.
+- IQR flags are reported separately as potential extremes, not automatically removed: traffic, climate and thickness variables are legitimately skewed and should be reviewed rather than clipped without engineering justification.
+
+## 4. Variables related to future PCI
+
+{chr(10).join(top_corr_lines(pci_rank))}
+
+These are univariate relationships only. A weak linear correlation does not mean a variable is useless in nonlinear or interaction-based models.
+
+## 5. Variables related to future rut depth
+
+{chr(10).join(top_corr_lines(rut_rank))}
+
+## 6. Do PCI and rutting deteriorate together?
+
+There are **{comp_metrics.get('matched_pairs', 0):,}** matched current-to-next road-survey pairs available in both modelling tables.
+
+- Current PCI vs current rut depth: Pearson r = **{comp_metrics.get('current_corr', np.nan):.3f}**.
+- Future PCI vs future rut depth: Pearson r = **{comp_metrics.get('future_corr', np.nan):.3f}**.
+- PCI-change vs rut-change correlation: **{comp_metrics.get('change_corr', np.nan):.3f}**.
+- Annualised deterioration-rate correlation: **{comp_metrics.get('rate_corr', np.nan):.3f}**.
+- Both measures deteriorated on **{comp_metrics.get('both_deteriorated', 0)} ({both_pct:.1f}%)** matched pairs.
+- PCI deteriorated while rutting did not on **{comp_metrics.get('pci_only', 0)} ({pci_only_pct:.1f}%)**.
+- Rutting deteriorated while PCI did not on **{comp_metrics.get('rut_only', 0)} ({rut_only_pct:.1f}%)**.
+- Neither deteriorated on **{comp_metrics.get('neither', 0)} ({neither_pct:.1f}%)**.
+
+This directly tests the client's question. If the correlations are modest and there are many one-measure-only deterioration cases, PCI and rutting should not be treated as interchangeable condition measures — which supports modelling them separately.
+
+## 7. Are they driven by the same factors?
+
+Among the common numeric predictors, the overlap between the ten strongest absolute linear relationships for the two targets is **{comp_metrics.get('top10_shared_factor_overlap_count', 0)} of 10**. Shared variables in that overlap are: **{', '.join(comp_metrics.get('top10_shared_factor_overlap', [])) or 'none'}**.
+
+Highest combined common-factor relationships:
+
+{chr(10).join(factor_lines)}
+
+The comparison should be interpreted as screening evidence rather than causal attribution. Model-based feature importance and SHAP should later be compared with these EDA relationships.
+
+## 8. Modelling implications
+
+1. **Keep PCI and rutting separate.** Their scales, available rows and deterioration behaviour are not identical.
+2. **Current condition and condition-history variables should be retained as candidate predictors** where they are legitimately available at prediction time; they generally carry strong signal for next-survey condition.
+3. **Age, traffic, climate and structure should remain in the candidate feature set** even where simple correlations are modest, because tree-based models can capture nonlinear thresholds and interactions.
+4. **Do not silently delete highly sparse maintenance/history variables.** Their missingness has domain meaning and should be handled consistently in model preprocessing.
+5. **Use the shared road-level train/test assignment.** EDA does not alter the split and therefore does not create leakage.
+6. **Report MAE, RMSE and R² separately for PCI and rutting.** Cross-target error magnitudes are not directly comparable because the outcome scales differ.
+
+## 9. Files produced
+
+The script saves separate descriptive tables, missingness tables, outlier/domain-check tables, target-correlation rankings, two correlation matrices, matched PCI-rutting comparisons and all requested figures into `/results` and `/plots`.
+"""
+    out = results_dir / "eda_v2_summary.md"
+    out.write_text(text, encoding="utf-8")
     return text
 
 
-# ---------------------------------------------------------------------
-# Public pipeline entry point
-# ---------------------------------------------------------------------
-def run() -> None:
-    os.makedirs(config.RESULTS_DIR, exist_ok=True)
-    os.makedirs(config.PLOTS_DIR, exist_ok=True)
+# -----------------------------------------------------------------------------
+# Main pipeline
+# -----------------------------------------------------------------------------
+def analyse_one(df: pd.DataFrame, dataset_name: str, target: str, current: str,
+                label: str, prefix: str, plots_dir: Path, results_dir: Path):
+    validate_dataset(df, dataset_name, target, current)
 
-    print(f"[eda] Loading and validating: {config.MODEL_DATASET_PATH}")
-    df = schema_checks.load_and_validate()
+    overview = dataset_overview(df, dataset_name)
+    types = variable_types_table(df, dataset_name)
+    desc = descriptive_table(df, dataset_name, target)
+    missing = missing_table(df, dataset_name)
+    outliers = iqr_outliers(df, dataset_name, target)
+    domain = domain_checks(df, dataset_name, target, current)
 
-    overview = dataset_overview(df)
-    descriptive_statistics(df)
-    missing = missing_value_analysis(df)
-    outliers, domain_checks = extreme_value_analysis(df)
-    rut_audit = rut_missingness_target_audit(df)
-    pci_distribution_plots(df)
-    relationship_plots(df)
-    _, target_rank = correlation_analysis(df)
-    summary = write_summary(df, missing, outliers, domain_checks, target_rank, rut_audit)
+    overview.to_csv(results_dir / f"{prefix}_dataset_overview.csv", index=False)
+    types.to_csv(results_dir / f"{prefix}_variable_types.csv", index=False)
+    desc.to_csv(results_dir / f"{prefix}_descriptive_statistics.csv", index=False)
+    missing.to_csv(results_dir / f"{prefix}_missing_values.csv", index=False)
+    outliers.to_csv(results_dir / f"{prefix}_outlier_summary.csv", index=False)
+    domain.to_csv(results_dir / f"{prefix}_domain_quality_checks.csv", index=False)
 
-    print("[eda] Dataset overview:")
-    print(overview.to_string(index=False))
-    print("\n[eda] Strongest numeric relationships with PCI_NEXT:")
-    print(target_rank.head(10)[["variable", "pearson_r", "spearman_rho"]].to_string(index=False))
-    print(f"\n[eda] Summary written to: {config.EDA_SUMMARY_PATH}")
-    print(f"[eda] Tables written to:  {config.RESULTS_DIR}")
-    print(f"[eda] Plots written to:   {config.PLOTS_DIR}")
-    print("\n" + summary)
+    distribution_plot(df, current, target, label, prefix, plots_dir)
+    relationship_plots(df, target, f"Future {label}", prefix, plots_dir)
+    missing_plot(missing, prefix, dataset_name, plots_dir)
+    outlier_plot(outliers, prefix, dataset_name, plots_dir)
+    corr, ranking = correlation_outputs(df, dataset_name, target, prefix, plots_dir, results_dir)
+
+    return {
+        "overview": overview,
+        "types": types,
+        "desc": desc,
+        "missing": missing,
+        "outliers": outliers,
+        "domain": domain,
+        "corr": corr,
+        "ranking": ranking,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="EDA for separate PCI and rutting modelling datasets")
+    parser.add_argument("--pci", default=None, help="Path to model_dataset_pci.csv")
+    parser.add_argument("--rut", default=None, help="Path to model_dataset_rut.csv")
+    parser.add_argument("--plots", default=str(DEFAULT_PLOTS_DIR), help="Plot output directory")
+    parser.add_argument("--results", default=str(DEFAULT_RESULTS_DIR), help="Results output directory")
+    args = parser.parse_args()
+
+    pci_path = resolve_input(args.pci, "model_dataset_pci.csv")
+    rut_path = resolve_input(args.rut, "model_dataset_rut.csv")
+    plots_dir = Path(args.plots).resolve()
+    results_dir = Path(args.results).resolve()
+    ensure_dirs(plots_dir, results_dir)
+
+    print(f"[eda] Loading PCI dataset: {pci_path}")
+    pci = pd.read_csv(pci_path, low_memory=False)
+    print(f"[eda] Loading rutting dataset: {rut_path}")
+    rut = pd.read_csv(rut_path, low_memory=False)
+
+    pci_res = analyse_one(
+        pci, "PCI distress-only dataset", PCI_TARGET, PCI_CURRENT,
+        "PCI", "eda_pci", plots_dir, results_dir
+    )
+    rut_res = analyse_one(
+        rut, "Rutting dataset", RUT_TARGET, RUT_CURRENT,
+        "rut depth (1/8 inch)", "eda_rut", plots_dir, results_dir
+    )
+
+    _, factors, metrics = compare_pci_rut(
+        pci, rut, pci_res["ranking"], rut_res["ranking"], plots_dir, results_dir
+    )
+    summary = write_summary(
+        pci, rut,
+        pci_res["missing"], rut_res["missing"],
+        pci_res["domain"], rut_res["domain"],
+        pci_res["ranking"], rut_res["ranking"],
+        metrics, factors, results_dir
+    )
+
+    # Combined convenience files for reporting.
+    pd.concat([pci_res["overview"], rut_res["overview"]], ignore_index=True).to_csv(
+        results_dir / "eda_v2_dataset_overview.csv", index=False
+    )
+    pd.concat([pci_res["missing"], rut_res["missing"]], ignore_index=True).to_csv(
+        results_dir / "eda_v2_missing_values.csv", index=False
+    )
+    pd.concat([pci_res["outliers"], rut_res["outliers"]], ignore_index=True).to_csv(
+        results_dir / "eda_v2_outlier_summary.csv", index=False
+    )
+    pd.concat([pci_res["domain"], rut_res["domain"]], ignore_index=True).to_csv(
+        results_dir / "eda_v2_domain_quality_checks.csv", index=False
+    )
+
+    print("\n[eda] COMPLETE")
+    print(f"[eda] Plots:   {plots_dir}")
+    print(f"[eda] Results: {results_dir}")
+    print("[eda] Report summary: eda_v2_summary.md")
+    print("\n" + summary.split("## 9. Files produced")[0][-1800:])
+
+
+def run():
+    """Pipeline entry point (added by Abdullah during integration).
+
+    Aum's module is a standalone script with an argparse main(). The pipeline calls
+    run(), so this wraps main() with the pipeline's configured paths. His analysis code
+    is untouched.
+    """
+    import sys
+    import config
+    argv = sys.argv
+    sys.argv = [argv[0],
+                "--pci", config.MODEL_DATASET_PCI_PATH,
+                "--rut", config.MODEL_DATASET_RUT_PATH,
+                "--plots", config.PLOTS_DIR,
+                "--results", config.RESULTS_DIR]
+    try:
+        main()
+    finally:
+        sys.argv = argv
 
 
 if __name__ == "__main__":
-    run()
+    main()
