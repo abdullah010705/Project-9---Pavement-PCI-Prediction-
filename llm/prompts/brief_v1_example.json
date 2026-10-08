@@ -1,0 +1,179 @@
+{
+ "_note": "Worked example for brief_v1. Training-split road, frozen 2026-09-30. Hand-written reference brief; passes validate().",
+ "payload": {
+  "headline": {
+   "road_id": "15-1006-1",
+   "predictions": [
+    {
+     "target": "PCI",
+     "predicted": 38.2,
+     "predicted_band": "Very Poor"
+    },
+    {
+     "target": "rut depth",
+     "predicted": 9.5,
+     "predicted_band": "low severity"
+    }
+   ],
+   "action_tier": "corrective"
+  },
+  "condition_now": {
+   "pci": 58.9,
+   "pci_rating": "Fair",
+   "dominant_distress": "longitudinal and transverse cracking, high severity",
+   "rut_depth_mm": 9.5,
+   "rut_severity": "low severity",
+   "iri_m_per_km": 2.39,
+   "pavement_age_years": 14.8
+  },
+  "outlook": [
+   {
+    "target": "PCI",
+    "unit": null,
+    "predicted": 38.2,
+    "predicted_band": "Very Poor",
+    "typical_error": 14.2,
+    "range_low": 24.0,
+    "range_high": 52.3,
+    "years_to_next_survey": 2.4,
+    "model_average": 69.5
+   },
+   {
+    "target": "rut depth",
+    "unit": "mm",
+    "predicted": 9.5,
+    "predicted_band": "low severity",
+    "typical_error": 5.2,
+    "range_low": 4.3,
+    "range_high": 14.6,
+    "years_to_next_survey": 2.4,
+    "model_average": 23.1
+   }
+  ],
+  "drivers": [
+   {
+    "target": "PCI",
+    "label": "current PCI",
+    "value": 58.9,
+    "unit": null,
+    "effect": 18.6,
+    "direction": "lowered",
+    "value_was_filled": false,
+    "effect_unit": "PCI points"
+   },
+   {
+    "target": "PCI",
+    "label": "current PCI rating is Good",
+    "value": "no",
+    "unit": null,
+    "effect": 2.6,
+    "direction": "lowered",
+    "value_was_filled": false,
+    "effect_unit": "PCI points"
+   },
+   {
+    "target": "PCI",
+    "label": "freeze–thaw cycles (annual)",
+    "value": 0.0,
+    "unit": null,
+    "effect": 2.2,
+    "direction": "lowered",
+    "value_was_filled": false,
+    "effect_unit": "PCI points"
+   },
+   {
+    "target": "PCI",
+    "label": "roughness (IRI, left wheel path)",
+    "value": 2.39,
+    "unit": "m/km",
+    "effect": 2.2,
+    "direction": "lowered",
+    "value_was_filled": false,
+    "effect_unit": "PCI points"
+   },
+   {
+    "target": "rut depth",
+    "label": "current rut depth",
+    "value": 9.5,
+    "unit": "mm",
+    "effect": 10.8,
+    "direction": "lowered",
+    "value_was_filled": false,
+    "effect_unit": "mm"
+   },
+   {
+    "target": "rut depth",
+    "label": "rut depth at the previous survey",
+    "value": 9.5,
+    "unit": "mm",
+    "effect": 1.9,
+    "direction": "lowered",
+    "value_was_filled": false,
+    "effect_unit": "mm"
+   },
+   {
+    "target": "rut depth",
+    "label": "average solar radiation at the surface",
+    "value": 194102.0,
+    "unit": null,
+    "effect": 0.4,
+    "direction": "lowered",
+    "value_was_filled": false,
+    "effect_unit": "mm"
+   },
+   {
+    "target": "rut depth",
+    "label": "annual evaporation",
+    "value": 1668.0,
+    "unit": null,
+    "effect": 0.4,
+    "direction": "lowered",
+    "value_was_filled": false,
+    "effect_unit": "mm"
+   }
+  ],
+  "repair": {
+   "probability_pct": 97,
+   "flagged": true,
+   "decision_threshold_pct": 50,
+   "pci_repair_threshold": 55,
+   "test_precision_pct": 78,
+   "test_recall_pct": 79,
+   "test_repairs_caught": 31,
+   "test_repairs_total": 39
+  },
+  "action": {
+   "tier": "corrective",
+   "description": "Programme a detailed inspection with a view to corrective treatment.",
+   "reasons": [
+    "the repair classifier flags this survey",
+    "predicted PCI is below the repair threshold"
+   ]
+  },
+  "caveats": [
+   "On held-out data this rutting model was not reliably more accurate than simply assuming rut depth stays as it is now.",
+   "The drivers describe how the model reached its estimate; they are not evidence of why the pavement deteriorates."
+  ]
+ },
+ "brief": {
+  "headline": "Road 15-1006-1 is predicted to fall to Very Poor (PCI 38.2) by the next survey; the recommended action is corrective.",
+  "condition_now": "The road is currently rated Fair, with a PCI of 58.9. The dominant distress is longitudinal and transverse cracking at high severity, rut depth is 9.5 mm (low severity), and the pavement is 14.8 years old.",
+  "outlook": "At the next survey, about 2.4 years away, the model predicts a PCI of 38.2 (Very Poor). Its typical error is 14.2 points, so the likely range is 24 to 52.3. Rut depth is predicted to be 9.5 mm (low severity), with a typical error of 5.2 mm and a likely range of 4.3 to 14.6 mm. The driver effects are measured from the model's average predictions of PCI 69.5 and rut depth 23.1 mm.",
+  "drivers": [
+   "The current PCI of 58.9 lowered the model's PCI estimate by 18.6 points.",
+   "The current rating not being Good lowered the PCI estimate by a further 2.6 points.",
+   "An annual freeze–thaw count of 0 lowered the PCI estimate by 2.2 points.",
+   "Roughness (IRI, left wheel path) of 2.39 m/km lowered the PCI estimate by 2.2 points.",
+   "The current rut depth of 9.5 mm lowered the model's rut depth estimate by 10.8 mm.",
+   "The rut depth at the previous survey, also 9.5 mm, lowered the rut depth estimate by 1.9 mm.",
+   "Average solar radiation at the surface (194,102) lowered the rut depth estimate by 0.4 mm.",
+   "Annual evaporation (1,668) lowered the rut depth estimate by 0.4 mm."
+  ],
+  "repair": "The repair classifier flags this road, with an estimated 97% probability that PCI will fall below 55. On test data it caught 31 of 39 roads that needed repair, and 78% of the roads it flagged did need repair.",
+  "action": "Corrective: programme a detailed inspection with a view to corrective treatment, because the repair classifier flags this survey and the predicted PCI is below the repair threshold.",
+  "caveats": [
+   "On held-out data the rutting model was not reliably more accurate than simply assuming rut depth stays as it is now.",
+   "The drivers describe how the model reached its estimate; they are not evidence of why the pavement deteriorates."
+  ]
+ }
+}

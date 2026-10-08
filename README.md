@@ -17,22 +17,34 @@ Plus one classification target, PCI dataset only: `NEEDS_REPAIR` (1 if
 ## Run
 
 ```bash
-./run.sh
+./run.sh          # the modelling pipeline — nine stages
+./run_llm.sh      # the LLM condition briefs (Component E)
 ```
 
-That is the whole thing. On first run it creates `.venv`, installs
-everything from `requirements.txt`, and runs the pipeline. After that it
-just runs — about 90 seconds at demo settings.
+**Two entry points, because they are two different things.** `./run.sh` builds the
+datasets, trains and evaluates every model, and writes all the results and figures.
+`./run_llm.sh` turns those saved models into plain-English briefs for individual roads.
+You can also fold the briefs into the pipeline run with `./run.sh --with-llm`.
+
+On first run either script creates `.venv` and installs what it needs. After that
+`./run.sh` takes about two to three minutes.
 
 | Command | What it does |
 |---|---|
-| `./run.sh` | Normal run |
+| `./run.sh` | Normal run — all nine modelling stages |
+| `./run.sh --with-llm` | As above, plus three sample condition briefs into `results/llm_sample_briefs.md` |
 | `./run.sh --rebuild-dataset` | Regenerate both datasets from raw data first |
 | `./run.sh --stop-on-missing` | Fail on an unimplemented stage instead of skipping (currently passes) |
 | `PCI_SEARCH_ITER=40 ./run.sh` | Thorough hyperparameter search — **use this for any number that goes in the report** |
+| `./run_llm.sh brief --road 1-4126-1 --date 1993-03-30` | A brief for one road |
+| `./run_llm.sh test` | The LLM layer's 23 tests — no Ollama needed |
 
-`PCI_SEARCH_ITER` defaults to 40. Lower it (10 or so) for demos; a fast run
-is fine for showing the pipeline works but should not be quoted.
+`PCI_SEARCH_ITER` defaults to 40. Lower it (10 or so) for demos.
+
+> **A fast run overwrites the reportable figures.** `results/` and `models/` are rewritten
+> on every run, and the LLM layer's tests check the saved models reproduce the reported
+> numbers. If you do a reduced-search run, restore the real figures afterwards with
+> `PCI_SEARCH_ITER=40 ./run.sh`. The pipeline prints a warning when this applies.
 
 **Requirements:** Python 3.10 or newer — macOS ships 3.9, which will not
 work. On macOS XGBoost also needs Apple's OpenMP runtime
@@ -160,6 +172,62 @@ name (see `results_io.py`'s docstring for why that matters).
 etc. still exist and point at the PCI target, so old scratch scripts don't
 hard-crash on import. Don't write new code against them — use
 `config.TARGETS` instead.
+
+
+## The LLM layer (Component E, owner: Luke)
+
+`llm/` turns a road and a survey date into a short plain-English condition brief, built
+from the XGBoost predictions, their SHAP drivers and the repair classifier.
+
+```bash
+./run_llm.sh                                                   # demo brief
+./run_llm.sh brief --road 1-4126-1 --date 1993-03-30
+./run_llm.sh brief --road 1-4126-1 --date 1993-03-30 --no-llm  # template, no Ollama
+./run_llm.sh list --split test                                 # available surveys
+./run_llm.sh test                                              # 23 tests, no Ollama needed
+./run_llm.sh check                                             # environment checks
+./run_llm.sh eval                                              # 20-road evaluation
+```
+
+`run_llm.cmd` / `run_llm.ps1` are Luke's original Windows launchers and do the same thing.
+
+**The LLM never produces a number.** `llm/payload.py` builds the facts in code;
+`llm/validate.py` then checks every figure in the generated text against them, along with
+wording, units and completeness. If validation fails it retries once with the errors, and
+falls back to `llm/template_brief.py` — a deterministic brief with the same facts — if it
+fails again. Every attempt is recorded in `llm/outputs/briefs.jsonl`.
+
+A real brief needs [Ollama](https://ollama.com) installed locally **and the model
+downloaded**:
+
+```bash
+brew install ollama          # if not already installed
+ollama pull llama3.1:8b      # the default, ~4.7 GB
+ollama pull qwen3:8b         # optional second model, used by the evaluation
+```
+
+Installing Ollama is not enough on its own — the model is a separate download, and
+without it you get a 404 from the Ollama client. `run_llm.sh` checks for this and tells
+you which models you do have.
+
+Change the default with `LLM_MODEL=qwen3:8b ./run_llm.sh ...` or `--model qwen3:8b`.
+
+Without any model, everything still runs on the template path, which is also the
+evaluation baseline — but note that is deterministic code, not a language model, so it
+should not be demonstrated as the LLM component.
+
+`--with-llm` adds a pipeline stage that writes three sample briefs to
+`results/llm_sample_briefs.md`. It is off by default because it is a stretch-goal
+component and a real brief needs Ollama.
+
+### Two things Luke flagged
+
+- **Action tiers are provisional.** The corrective / preventive / investigate / monitor
+  rules in `llm/payload._action()` still need confirming with the client.
+- **The briefs deliberately avoid the disputed claim.** No brief says the PCI model beats
+  the age-trend baseline while the 0.802 vs 0.708 disagreement is unresolved, and the
+  rutting brief always states the model is not distinguishable from persistence, because
+  the bootstrap result says so.
 
 ## Current results (provisional — see open items)
 

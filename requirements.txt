@@ -18,3 +18,12 @@ shap>=0.44
 
 # Shared utilities
 joblib>=1.3
+
+# Luke - LLM condition briefs (Component E). Optional: only needed for `--with-llm`
+# and the run_llm launcher. A real brief also needs Ollama installed locally
+# (https://ollama.com) plus `ollama pull qwen3:8b`; without it the layer falls back
+# to the deterministic template. See llm/requirements.txt for the versions Luke verified.
+ollama>=0.6
+pydantic>=2.10
+jinja2>=3.1
+pytest>=8.0

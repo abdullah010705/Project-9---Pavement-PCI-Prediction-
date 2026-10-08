@@ -74,6 +74,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--rebuild-dataset", action="store_true",
                          help="Regenerate both model_dataset_{pci,rut}.csv + split_assignment.csv from raw data.")
+    parser.add_argument("--with-llm", action="store_true",
+                         help="Also generate sample condition briefs with the LLM layer "
+                              "(Component E). Needs Ollama for a real brief; falls back to "
+                              "the deterministic template if Ollama is unavailable.")
     parser.add_argument("--stop-on-missing", action="store_true",
                          help="Treat an unimplemented stage as a hard failure instead of skipping it.")
     args = parser.parse_args()
@@ -117,6 +121,14 @@ def main():
     from src.models import compare_vs_baselines
     run_stage("comparison vs baselines", "Abdullah", compare_vs_baselines.run,
               args.stop_on_missing)
+
+    # 5c. LLM condition briefs (Luke, Component E) — optional, off by default.
+    #     Generates plain-English briefs from the model outputs. The LLM never produces
+    #     a number: llm/payload.py builds the facts and llm/validate.py checks every
+    #     figure in the text against them.
+    if args.with_llm:
+        from src import llm_stage
+        run_stage("LLM condition briefs", "Luke", llm_stage.run, args.stop_on_missing)
 
     from src import evaluate
     run_stage("evaluation (both targets)", "Ravtej", evaluate.run, args.stop_on_missing)
