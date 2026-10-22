@@ -119,6 +119,15 @@ def run(target_key: str = None):
         te[cur].values + (curve_cur(age_now + gap) - curve_cur(age_now)), target_key)
 
     # 4-6. traditional ML
+    # Linear Regression on the rut target produces divide-by-zero and overflow warnings
+    # from numpy during the matrix multiply. They are printed noise, not errors: the fit,
+    # the predictions and the reported score are identical either way. Silenced so the
+    # pipeline output stays readable.
+    import warnings as _w
+    _ctx = _w.catch_warnings(); _ctx.__enter__()
+    _w.filterwarnings("ignore", category=RuntimeWarning)
+    _err = np.errstate(divide="ignore", over="ignore", invalid="ignore"); _err.__enter__()
+
     for name, model, pp in [
         ("Linear Regression", LinearRegression(), prep_scaled),
         ("Random Forest", RandomForestRegressor(n_estimators=500,
@@ -128,6 +137,8 @@ def run(target_key: str = None):
     ]:
         pipe = Pipeline([("prep", pp), ("model", model)]).fit(tr[feats], y_tr)
         preds[name] = _clip(pipe.predict(te[feats]), target_key)
+
+    _err.__exit__(None, None, None); _ctx.__exit__(None, None, None)
 
     rows = [{"model": n, **_metrics(y_te, p)} for n, p in preds.items()]
     results_io.append_results(target["results_metrics_path"], rows)

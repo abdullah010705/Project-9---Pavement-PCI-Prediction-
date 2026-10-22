@@ -13,7 +13,7 @@
 
   Never writes to the pipeline's data or results.
   Layout note: this launcher now lives inside the pipeline folder (previously it sat
-  beside a separate V0.0.3 folder). $Workspace is therefore the pipeline root.
+  beside a separate V0.0.4 folder). $Workspace is therefore the pipeline root.
 
 .EXAMPLE
   .\run_llm.ps1                                   # demo brief (road 53-1006-3)

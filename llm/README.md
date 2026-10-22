@@ -1,7 +1,7 @@
 # `llm/` — explainable condition briefs (Component E)
 
 > **Integration note (added when the LLM layer was merged into the pipeline).**
-> `llm/` now lives *inside* the pipeline folder rather than beside a separate `V0.0.3/`.
+> `llm/` now lives *inside* the pipeline folder rather than beside a separate `V0.0.4/`.
 > `v002.py` detects either layout by looking for `config.py`, and `V002_DIR` still
 > overrides it, so nothing else changed. `run_llm.sh` is the macOS/Linux equivalent of
 > `run_llm.cmd` / `run_llm.ps1`, and `./run.sh --with-llm` runs the briefs as an optional
@@ -9,7 +9,7 @@
 
 
 
-This package is the LLM layer on top of the V0.0.3 pipeline. It takes a road and a survey date and produces a short, plain-English condition brief. The facts in the brief come from the team's XGBoost models, their SHAP values and the repair classifier. A local Ollama model writes the sentences. See `../llm-plan.md` for the design and `../CLAUDE.md` for the project rules.
+This package is the LLM layer on top of the V0.0.4 pipeline. It takes a road and a survey date and produces a short, plain-English condition brief. The facts in the brief come from the team's XGBoost models, their SHAP values and the repair classifier. A local Ollama model writes the sentences. See `../llm-plan.md` for the design and `../CLAUDE.md` for the project rules.
 
 **Principle:** the LLM never produces a number. Code builds the facts (`payload.py`). Before a brief is accepted, `validate.py` checks every number in it against those facts, along with wording, units and completeness.
 
@@ -35,7 +35,7 @@ What it checks, in order:
 2. The venv exists, and is created if missing.
 3. The packages in `llm/requirements.txt` are installed; missing ones are installed.
 4. Ollama is installed, its server is running (started hidden if not), and the model is pulled.
-5. V0.0.3 data and results files are present, all three models load, and their test RMSE matches `results/`.
+5. V0.0.4 data and results files are present, all three models load, and their test RMSE matches `results/`.
 6. The prompt files and the evaluation sample exist.
 
 `python -m llm.check_env` runs checks 1, 3, 5 and 6 on their own.
@@ -122,7 +122,8 @@ that needs updating.
 
 | File | Role |
 |---|---|
-| `v002.py` | The only module that touches V0.0.3. It loads data, rebuilds the model input matrix exactly as `xgboost_shap.run()` does, loads the models, and reads results files. |
+| `interactive.py` | Asks which road and which survey, then writes the brief. Added after the client asked for direct user input; it only chooses the inputs, nothing about how a brief is produced changes. |
+| `v002.py` | The only module that touches V0.0.4. It loads data, rebuilds the model input matrix exactly as `xgboost_shap.run()` does, loads the models, and reads results files. |
 | `payload.py` | Builds the fact payload: predictions, uncertainty range, top-4 SHAP drivers, repair probability, action tier, and data notes. `for_prompt()` is the only view the LLM sees. |
 | `features_lookup.py` | Feature labels and display units. Rut depth is converted from eighths of an inch to mm. Units that haven't been verified are not shown. |
 | `schema.py` | Output fields (`BriefText`, passed to Ollama as a JSON schema) and the Markdown renderer. |
@@ -145,12 +146,12 @@ Choose a version with `--prompt brief_v1` on `llm.cli` or `run_eval`, or set `$e
 
 ## Things to know
 
-- **Model loading workaround.** The shipped `V0.0.3/models/*.joblib` files were pickled on macOS, and their learner *config* block will not load under Windows xgboost 3.4.1. `v002.booster()` loads only the *model* section: the trees, base score, objective and feature names. Nothing is refitted. The tests confirm the loaded models reproduce `results/` exactly: PCI test RMSE 14.160, rutting 1.627, and classifier TN 134 / FP 9 / FN 8 / TP 31.
+- **Model loading workaround.** The shipped `V0.0.4/models/*.joblib` files were pickled on macOS, and their learner *config* block will not load under Windows xgboost 3.4.1. `v002.booster()` loads only the *model* section: the trees, base score, objective and feature names. Nothing is refitted. The tests confirm the loaded models reproduce `results/` exactly: PCI test RMSE 14.160, rutting 1.627, and classifier TN 134 / FP 9 / FN 8 / TP 31.
 - **Action tiers are provisional.** The rules in `payload._action()` still need confirming with Luke and the client:
   - **corrective:** the repair classifier flags the road, predicted PCI < 55, or predicted rutting is high severity
   - **preventive:** predicted PCI < 70, or predicted rutting is medium severity
   - **investigate data:** the PCI calculation reported an error
   - **monitor:** none of the above
 - **Held back from the brief:** there is no claim that the PCI model beats the age-trend baseline until CLAUDE.md §6.1 (0.802 vs 0.708) is settled. The rutting brief always states that the model is not distinguishable from persistence, because the bootstrap result in `results/` says so.
-- **Demo-speed numbers:** all error figures are read from `V0.0.3/results/` at run time, so they update automatically after the full `PCI_SEARCH_ITER=40` run.
+- **Demo-speed numbers:** all error figures are read from `V0.0.4/results/` at run time, so they update automatically after the full `PCI_SEARCH_ITER=40` run.
 - **Pins:** pandas 2.3.3 and numpy 2.2.6 match `requirements-lock.txt`. xgboost 3.4.1, shap 0.52.0, scikit-learn 1.9.1 and joblib 1.6.0 are what this environment used, and are offered as pins for the lock file (Decision Log #18).

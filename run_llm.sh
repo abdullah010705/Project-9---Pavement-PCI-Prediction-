@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_llm.sh — macOS/Linux equivalent of Luke's run_llm.cmd / run_llm.ps1.
 #
-#   ./run_llm.sh                                  demo brief
+#   ./run_llm.sh                                  interactive: choose a road and survey
 #   ./run_llm.sh check                            environment checks only
 #   ./run_llm.sh brief --road 1-4126-1 --date 1993-03-30
 #   ./run_llm.sh brief --road 1-4126-1 --date 1993-03-30 --no-llm   # template, no Ollama
@@ -45,7 +45,7 @@ for mod in jinja2 pydantic ollama pytest; do
     fi
 done
 
-CMD="${1:-brief}"; [ $# -gt 0 ] && shift || true
+CMD="${1:-interactive}"; [ $# -gt 0 ] && shift || true
 
 case "$CMD" in
   test)
@@ -54,6 +54,15 @@ case "$CMD" in
     exec $PYBIN -m llm.check_env "$@" ;;
   eval)
     exec $PYBIN -m llm.eval.run_eval run "$@" ;;
+  interactive|pick|ask)
+    if ! command -v ollama >/dev/null 2>&1; then
+        echo "[run_llm] Ollama not installed — the picker will use the template fallback."
+        exec $PYBIN -m llm.interactive --no-llm "$@"
+    fi
+    if ! curl -s --max-time 2 http://localhost:11434/api/tags >/dev/null 2>&1; then
+        echo "[run_llm] Starting Ollama server ..."; (ollama serve >/dev/null 2>&1 &); sleep 3
+    fi
+    exec $PYBIN -m llm.interactive "$@" ;;
   brief|list|payload)
     # Ollama is only needed for a real brief, not for --no-llm, list or payload
     if [ "$CMD" = "brief" ] && [[ " $* " != *" --no-llm "* ]]; then
@@ -88,9 +97,6 @@ case "$CMD" in
             echo "      ./run_llm.sh brief --road 1-4126-1 --date 1993-03-30 --no-llm"
             exit 1
         fi
-    fi
-    if [ "$CMD" = "brief" ] && [ $# -eq 0 ]; then
-        set -- --road 1-4126-1 --date 1993-03-30     # demo default
     fi
     exec $PYBIN -m llm.cli "$CMD" "$@" ;;
   *)

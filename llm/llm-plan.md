@@ -1,7 +1,7 @@
 # LLM Plan — Pavement Deterioration Project (ZEIT3101, Group 9)
 
 > **Integration note (added when the LLM layer was merged into the pipeline).**
-> `llm/` now lives *inside* the pipeline folder rather than beside a separate `V0.0.3/`.
+> `llm/` now lives *inside* the pipeline folder rather than beside a separate `V0.0.4/`.
 > `v002.py` detects either layout by looking for `config.py`, and `V002_DIR` still
 > overrides it, so nothing else changed. `run_llm.sh` is the macOS/Linux equivalent of
 > `run_llm.cmd` / `run_llm.ps1`, and `./run.sh --with-llm` runs the briefs as an optional
@@ -12,7 +12,7 @@
 **Owner:** Luke
 **Started:** 30 Sep 2026
 **Status:** Draft v0.4. Component E v1 is built. Prompt `brief_v2` has been evaluated (§10a). The scope decisions in §9 are still open.
-**Builds on:** `V0.0.3/` (read-only), as described in `CLAUDE.md`
+**Builds on:** `V0.0.4/` (read-only), as described in `CLAUDE.md`
 
 ---
 
@@ -69,14 +69,14 @@ Objective 4 of the project outline asks us to *investigate the role of AI tools,
 | (a) | Interpreting maintenance records | **M: Maintenance interpreter** |
 | (b) | Generating explainable insights from prediction results | **E: Explainable condition brief** |
 
-Both components run on a **local LLM served by Ollama**. All other code is **Python**. The LLM only writes language. Every number comes from `V0.0.3` results, models or data through Python code.
+Both components run on a **local LLM served by Ollama**. All other code is **Python**. The LLM only writes language. Every number comes from `V0.0.4` results, models or data through Python code.
 
 ---
 
 ## 2. Design principles (non-negotiable)
 
 1. **The LLM never generates a number.** Python code builds a structured *fact payload*, and the LLM may only use figures that are in it. A validator extracts every number from the output and rejects the output if a number is not in the payload (allowing for rounding and unit conversion).
-2. **Read-only against `V0.0.3`.**
+2. **Read-only against `V0.0.4`.**
    - Import `config`, `schema_checks` and `results_io`.
    - Load `models/*.joblib`.
    - Never retrain and never edit team-owned files.
@@ -110,10 +110,10 @@ Both components run on a **local LLM served by Ollama**. All other code is **Pyt
 | Ollama | 0.24.0, installed |
 | Local models already pulled | `llama3.1:8b`, `qwen3:8b`, `mistral:7b`, `phi4-mini`, `nomic-embed-text` |
 | Python | 3.12.10 available (`py -3.12`). Use 3.12 to match the team's environment. |
-| `V0.0.3/.venv` | macOS venv. Ignore it. **Built instead:** `%USERPROFILE%\.venvs\zeit3101` (Python 3.12.10), kept outside OneDrive so package files don't sync. Pins are in `llm/requirements.txt`. |
+| `V0.0.4/.venv` | macOS venv. Ignore it. **Built instead:** `%USERPROFILE%\.venvs\zeit3101` (Python 3.12.10), kept outside OneDrive so package files don't sync. Pins are in `llm/requirements.txt`. |
 | Shipped `models/*.joblib` | Won't load with `joblib.load` on Windows: xgboost rejects the serialised learner config. `llm/v002.py` loads only the model section instead. **No refit.** Tests confirm the models exactly reproduce the `results/` metrics. |
 
-Python dependencies for the LLM layer, on top of `V0.0.3/requirements.txt`:
+Python dependencies for the LLM layer, on top of `V0.0.4/requirements.txt`:
 - `ollama`: the official Python client
 - `pydantic`: payload and output schemas
 - `jinja2`: prompt templates
@@ -125,7 +125,7 @@ Python dependencies for the LLM layer, on top of `V0.0.3/requirements.txt`:
 ## 4. Architecture
 
 ```
-            V0.0.3 (read-only)
+            V0.0.4 (read-only)
   data/ · models/*.joblib · results/*.csv|json · config.py
                      │
                      ▼
@@ -208,7 +208,7 @@ Some rows have implausible actual values, for example actual PCI 0.0 while curre
 
 ### 6.1 The data problem (decide before building)
 
-`V0.0.3` has **no free-text maintenance records**. Maintenance appears only as:
+`V0.0.4` has **no free-text maintenance records**. Maintenance appears only as:
 - `PRIOR_PATCH_COUNT`
 - `DAYS_SINCE_LAST_PATCH` (about 93% missing)
 - `LAST_PATCH_DATE` (raw file only)
@@ -231,7 +231,7 @@ This needs sign-off from the supervisor or client (see §9).
 ### 6.2 Pipeline (for M1/M3)
 
 1. `maintenance_ingest.py`
-   - Load the LTPP MNT/RHB exports into `llm/data_external/`, never into `V0.0.3/data/`.
+   - Load the LTPP MNT/RHB exports into `llm/data_external/`, never into `V0.0.4/data/`.
    - Map work-type codes to descriptions using a lookup table in code.
 2. `maintenance_payload.py`
    - Build a per-road event timeline.
@@ -262,16 +262,16 @@ This needs sign-off from the supervisor or client (see §9).
 
 ---
 
-## 8. Folder layout (new, sibling to `V0.0.3`)
+## 8. Folder layout (new, sibling to `V0.0.4`)
 
 ```
 AAA. LLM/
   CLAUDE.md
   llm-plan.md              ← this file
-  V0.0.3/                  ← team code, read-only
+  V0.0.4/                  ← team code, read-only
   llm/
     __init__.py
-    v002.py                # the only place that adds V0.0.3 to sys.path; imports config etc.
+    v002.py                # the only place that adds V0.0.4 to sys.path; imports config etc.
     payload.py             # Component E fact payload
     features_lookup.py     # feature name → plain label + unit
     maintenance_ingest.py  # Component M
@@ -318,7 +318,7 @@ AAA. LLM/
 
 | # | Milestone | Done when | Status (30 Sep 2026) |
 |---|---|---|---|
-| 0 | Environment | The venv works. The `V0.0.3` pipeline runs at `PCI_SEARCH_ITER=10`. `ollama` client reaches the local server. | **Partly done.** The venv and Ollama work. The pipeline has **not** been re-run: a run overwrites the shared `V0.0.3/results/` and `models/`, which needs Luke's go-ahead. |
+| 0 | Environment | The venv works. The `V0.0.4` pipeline runs at `PCI_SEARCH_ITER=10`. `ollama` client reaches the local server. | **Partly done.** The venv and Ollama work. The pipeline has **not** been re-run: a run overwrites the shared `V0.0.4/results/` and `models/`, which needs Luke's go-ahead. |
 | 1 | Model access | All three joblib models load and score one row with the correct reduced feature order. | **Done**, using the loader workaround (§3). The models reproduce `results/` exactly. |
 | 2 | Fact payload | `payload.py` returns a validated payload for any test row. Unit tests pass. The template brief renders. | **Done.** 17 tests pass, and the template brief is valid for all 183 test surveys. |
 | 3 | Component E v1 | Prompt, Ollama call and validator work end to end, and trace records are written. | **Done.** Prompt `brief_v1` has one worked example. The flow is validate, retry once, then fall back to the template. |

@@ -43,7 +43,7 @@ def check_python():
     print("Python")
     v = sys.version_info
     if v < (3, 10):
-        fail(f"Python {v.major}.{v.minor} — V0.0.3 needs 3.10 or later")
+        fail(f"Python {v.major}.{v.minor} — V0.0.4 needs 3.10 or later")
     elif (v.major, v.minor) != (3, 12):
         warn(f"Python {v.major}.{v.minor}.{v.micro} — team environment is 3.12")
     else:
@@ -53,7 +53,7 @@ def check_python():
 def check_packages():
     print("Packages (llm/requirements.txt)")
     from importlib.metadata import PackageNotFoundError, version
-    extra = ["matplotlib", "seaborn", "httpx"]  # needed by V0.0.3 imports / Ollama client
+    extra = ["matplotlib", "seaborn", "httpx"]  # needed by V0.0.4 imports / Ollama client
     pins = {}
     with open(REQUIREMENTS) as f:
         for line in f:
@@ -75,11 +75,11 @@ def check_packages():
 
 
 def check_v002():
-    print("V0.0.3 (read-only)")
+    print("V0.0.4 (read-only)")
     try:
         from llm import v002
     except Exception as e:  # noqa: BLE001
-        fail(f"cannot import V0.0.3 config: {e}")
+        fail(f"cannot import V0.0.4 config: {e}")
         return
     ok(f"found {v002.V002_DIR}")
     cfg = v002.config

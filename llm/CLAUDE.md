@@ -1,7 +1,7 @@
-# CLAUDE.md — Handover: ZEIT3101 Pavement Deterioration Project (V0.0.3) → LLM workstream
+# CLAUDE.md — Handover: ZEIT3101 Pavement Deterioration Project (V0.0.4) → LLM workstream
 
 > **Integration note (added when the LLM layer was merged into the pipeline).**
-> `llm/` now lives *inside* the pipeline folder rather than beside a separate `V0.0.3/`.
+> `llm/` now lives *inside* the pipeline folder rather than beside a separate `V0.0.4/`.
 > `v002.py` detects either layout by looking for `config.py`, and `V002_DIR` still
 > overrides it, so nothing else changed. `run_llm.sh` is the macOS/Linux equivalent of
 > `run_llm.cmd` / `run_llm.ps1`, and `./run.sh --with-llm` runs the briefs as an optional
@@ -11,7 +11,7 @@
 
 **Owner of this workspace:** Luke (ADFA, Mech Eng, ZEIT3101 IT Project 2, Group 9)
 **Handover date:** 24 Sep 2026
-**Codebase state:** `V0.0.3/` — the v2 integrated pipeline, last touched 20 Sep 2026 (integrated by Abdullah)
+**Codebase state:** `V0.0.4/` — the v2 integrated pipeline, last touched 20 Sep 2026 (integrated by Abdullah)
 **Your job in this folder:** help Luke build an LLM component on top of the existing ML pipeline, and help close out Luke's own open items in that pipeline.
 **Last updated:** 30 Sep 2026. The LLM layer (Component E) is built in `llm/`. See **§10** for the current state, and `llm-plan.md` for the plan and evaluation log.
 
@@ -23,7 +23,7 @@ Read this whole file before touching anything. Section 7 (known inconsistencies)
 
 1. **Australian English** in all prose, comments and docs (analyse, colour, modelling, behaviour).
 2. **Metric units** in anything Luke writes up. The data is in LTPP (US) units — see §3.4 for conversions. Do not rewrite source data; convert at the presentation layer.
-3. **`V0.0.3/` is the team's shared code.** Do not edit files owned by other members (see §2 table) without Luke's say-so. Build the LLM work in a **new sibling folder** (suggested: `AAA. LLM/llm/`) that *imports* from `V0.0.3`, rather than modifying it.
+3. **`V0.0.4/` is the team's shared code.** Do not edit files owned by other members (see §2 table) without Luke's say-so. Build the LLM work in a **new sibling folder** (suggested: `AAA. LLM/llm/`) that *imports* from `V0.0.4`, rather than modifying it.
 4. **Never touch `data/`** except via `--rebuild-dataset`. Never re-split. The train/test split is `SPLIT` column + `data/split_assignment.csv`, grouped by `PHYSICAL_ROAD_ID`. Anything that leaks test rows into training, tuning or feature selection is a defect.
 5. **Use `config.py` for paths/columns and `results_io.py` for writing results.** No hardcoded paths or column names.
 6. **Numbers come from files, not from docs.** The README, INTEGRATION_NOTES and TUNING_CHANGE_NOTE all quote figures that no longer match `results/` (see §7). The CSV/JSON files in `results/` are the only source of truth, and even those are from a demo-speed run.
@@ -66,13 +66,13 @@ The outline specifically names two LLM uses: **(a) interpreting maintenance reco
 | **Abdullah** | Feature reduction, XGBoost + SHAP, repair classifier, baseline comparison | `src/models/{feature_reduction,xgboost_shap,repair_classifier,compare_vs_baselines,reconcile_baseline}.py` |
 | **Ravtej** | Config, pipeline, schema checks, evaluation, integration, Decision Log, lock file | `config.py`, `run_pipeline.py`, `src/schema_checks.py`, `src/evaluate.py`, `results_io.py`, `requirements-lock.txt`, `Decision_Log_v2.docx` |
 
-Integration is formally Ravtej's; Abdullah did it for V0.0.3 because Review 2 was close. It is meant to go back to Ravtej.
+Integration is formally Ravtej's; Abdullah did it for V0.0.4 because Review 2 was close. It is meant to go back to Ravtej.
 
 ---
 
 ## 3. Data
 
-### 3.1 Files (`V0.0.3/data/`)
+### 3.1 Files (`V0.0.4/data/`)
 
 | File | Rows × cols | Role |
 |---|---|---|
@@ -122,9 +122,9 @@ There are **no free-text maintenance records** anywhere in the dataset. "Mainten
 Stages raising `NotImplementedError` are skipped unless `--stop-on-missing`.
 
 ### 4.2 Running it on Luke's machine (Windows) — **the shipped `.venv` will not work**
-`V0.0.3/.venv` was created on Abdullah's Mac (`/Users/abdullah/...`, Homebrew Python 3.12.13, `bin/` layout). It is useless on Windows and should be deleted/ignored. `run.sh` is bash and Mac-oriented.
+`V0.0.4/.venv` was created on Abdullah's Mac (`/Users/abdullah/...`, Homebrew Python 3.12.13, `bin/` layout). It is useless on Windows and should be deleted/ignored. `run.sh` is bash and Mac-oriented.
 
-On Windows (PowerShell), from `V0.0.3/`:
+On Windows (PowerShell), from `V0.0.4/`:
 ```powershell
 py -3.12 -m venv .venv-win
 .\.venv-win\Scripts\Activate.ps1
@@ -147,7 +147,7 @@ Code default is **25** (`src/models/xgboost_shap.py:63`). README and INTEGRATION
 
 ---
 
-## 5. Current results — as actually on disk (`V0.0.3/results/`, 20 Sep 2026, fast run)
+## 5. Current results — as actually on disk (`V0.0.4/results/`, 20 Sep 2026, fast run)
 
 ### PCI_NEXT — test, n = 182 (`model_performance_pci.csv`)
 | Model | MAE | RMSE | R² |
@@ -212,7 +212,7 @@ Two uploads overwrote each other; Rayyan built v2 from one copy. Client asked fo
 
 ---
 
-## 7. Known inconsistencies in V0.0.3 (documentation drift — fix or flag before Review 2)
+## 7. Known inconsistencies in V0.0.4 (documentation drift — fix or flag before Review 2)
 
 | # | Where | Says | Actually (on disk) |
 |---|---|---|---|
@@ -257,7 +257,7 @@ Blocked by §3.5 — no text records exist. Options: source LTPP maintenance/reh
 - **Honest uncertainty:** include the model's test/CV error (e.g. PCI RMSE ≈ 12–14 points) so the brief does not overclaim. Rutting improvements over persistence are not statistically distinguishable — the LLM must not say otherwise.
 - **Direction of SHAP:** SHAP explains the model, not the pavement. Wording must be "the model's prediction was pulled down mainly by…", not "the road will fail because…".
 - **Units:** present rut depth in mm, keep PCI on 0–100.
-- **Read-only against V0.0.3:** load models from `V0.0.3/models/*.joblib` and data via `config` / `schema_checks`; do not retrain inside the LLM code.
+- **Read-only against V0.0.4:** load models from `V0.0.4/models/*.joblib` and data via `config` / `schema_checks`; do not retrain inside the LLM code.
 - **Evaluation plan from day one:** factual-consistency check (automated), plus a small human rating rubric (accuracy, usefulness, clarity) over a fixed sample of test-set roads (e.g. 20 stratified by PCI band and repair flag). This is what turns the LLM work into a thesis result rather than a demo.
 
 ### 8.3 Open questions to put to Luke
@@ -268,14 +268,14 @@ Blocked by §3.5 — no text records exist. Options: source LTPP maintenance/reh
 5. Dates for Review 2 and the final demo? *(open)*
 6. Component M data source: M1, M2 or M3? *(open, blocks Component M)*
 7. Action-tier rules in `llm/payload.py` are provisional. Confirm them with the client. *(open)*
-8. May the V0.0.3 pipeline be re-run in place? *(open)*
+8. May the V0.0.4 pipeline be re-run in place? *(open)*
 
 ### 8.4 Suggested first session — DONE
 Environment, model loading, `payload.py`, prompts, validator, evaluation and launcher are all built. See §10. Keep §6.1 (anchored baseline) moving; it still gates what the whole team can claim.
 
 ---
 
-## 9. File map (`V0.0.3/`)
+## 9. File map (`V0.0.4/`)
 
 ```
 config.py                 paths, columns, TARGETS, CLASSIFIER, seed, REPAIR_THRESHOLD=55
@@ -306,10 +306,10 @@ Open Decision Log items: **#9** include `YEARS_TO_NEXT_SURVEY` as a feature? (im
 ```
 AAA. LLM/
   CLAUDE.md, llm-plan.md    this file; the plan (v0.4) with milestones and evaluation log (§10a)
-  run_llm.ps1, run_llm.cmd  launcher: checks → installs → starts Ollama → runs (never writes V0.0.3)
-  V0.0.3/                   team code, read-only
+  run_llm.ps1, run_llm.cmd  launcher: checks → installs → starts Ollama → runs (never writes V0.0.4)
+  V0.0.4/                   team code, read-only
   llm/                      Component E (see llm/README.md for the full map)
-    v002.py                 the ONLY module that touches V0.0.3 (data, feature matrix, model loading, results)
+    v002.py                 the ONLY module that touches V0.0.4 (data, feature matrix, model loading, results)
     payload.py              fact payload per ROAD_ID + SURVEY_DATE; for_prompt() is all the LLM sees
     features_lookup.py      labels + display units (rut ×3.175 → mm; unverified units are not shown)
     schema.py               BriefText output fields (Ollama JSON schema) + markdown renderer

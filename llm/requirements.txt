@@ -1,10 +1,10 @@
-# LLM layer, on top of V0.0.3/requirements.txt
+# LLM layer, on top of V0.0.4/requirements.txt
 ollama==0.6.3
 pydantic==2.13.5
 jinja2==3.1.6
 pytest==9.1.1
 
-# Versions this layer was verified with (V0.0.3 lock file pins only pandas/numpy)
+# Versions this layer was verified with (V0.0.4 lock file pins only pandas/numpy)
 pandas==2.3.3
 numpy==2.2.6
 xgboost==3.4.1

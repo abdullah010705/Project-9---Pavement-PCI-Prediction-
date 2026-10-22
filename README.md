@@ -36,7 +36,8 @@ On first run either script creates `.venv` and installs what it needs. After tha
 | `./run.sh --rebuild-dataset` | Regenerate both datasets from raw data first |
 | `./run.sh --stop-on-missing` | Fail on an unimplemented stage instead of skipping (currently passes) |
 | `PCI_SEARCH_ITER=40 ./run.sh` | Thorough hyperparameter search — **use this for any number that goes in the report** |
-| `./run_llm.sh brief --road 1-4126-1 --date 1993-03-30` | A brief for one road |
+| `./run_llm.sh` | **Interactive** — lists the roads, you pick one, then pick a survey |
+| `./run_llm.sh brief --road 1-4126-1 --date 1993-03-30` | A brief for one road, non-interactive |
 | `./run_llm.sh test` | The LLM layer's 23 tests — no Ollama needed |
 
 `PCI_SEARCH_ITER` defaults to 40. Lower it (10 or so) for demos.
@@ -180,7 +181,7 @@ hard-crash on import. Don't write new code against them — use
 from the XGBoost predictions, their SHAP drivers and the repair classifier.
 
 ```bash
-./run_llm.sh                                                   # demo brief
+./run_llm.sh                                                   # interactive: pick a road and survey
 ./run_llm.sh brief --road 1-4126-1 --date 1993-03-30
 ./run_llm.sh brief --road 1-4126-1 --date 1993-03-30 --no-llm  # template, no Ollama
 ./run_llm.sh list --split test                                 # available surveys

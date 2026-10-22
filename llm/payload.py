@@ -1,7 +1,7 @@
 """
 payload.py — the fact payload for one road survey (Component E).
 
-Every number an LLM brief may use is computed here, by code, from V0.0.3 data,
+Every number an LLM brief may use is computed here, by code, from V0.0.4 data,
 models and results files. The LLM receives `Payload.for_prompt()` and nothing
 else. Rounding to display precision happens here, so the validator can match
 figures in the output exactly.

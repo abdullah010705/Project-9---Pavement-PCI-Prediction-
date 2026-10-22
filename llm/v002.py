@@ -2,7 +2,7 @@
 v002.py — the only module that reaches into the pipeline.
 
 Naming note: the file name and the V002_DIR environment variable keep their
-original spelling even though the pipeline folder is now V0.0.3. They are code
+original spelling even though the pipeline folder is now V0.0.4. They are code
 identifiers, not version labels — renaming them would break Luke's tests, his
 evaluation runner and anyone's existing V002_DIR override, for no benefit.
 
@@ -36,11 +36,11 @@ def _default_v002_dir() -> str:
     """
     if os.path.exists(os.path.join(WORKSPACE_DIR, "config.py")):
         return WORKSPACE_DIR                       # llm/ is inside the pipeline
-    for name in ("V0.0.3", "V0.0.2"):          # llm/ sitting beside the pipeline
+    for name in ("V0.0.4", "V0.0.3", "V0.0.2"):          # llm/ sitting beside the pipeline
         nested = os.path.join(WORKSPACE_DIR, name)
         if os.path.exists(os.path.join(nested, "config.py")):
             return nested
-    return os.path.join(WORKSPACE_DIR, "V0.0.3")
+    return os.path.join(WORKSPACE_DIR, "V0.0.4")
 
 
 V002_DIR = os.environ.get("V002_DIR", _default_v002_dir())
